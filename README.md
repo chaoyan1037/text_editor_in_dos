@@ -10,5 +10,5 @@ To draw the GUI of the text editor, we use the BGI(Graphics Driver for Borland C
 
 What is more, we use the DOS Box to simulate the DOS environment in Windows.
 
-
+To use it, you may download TC3.0 here(http://thefunplace.co.uk/topic/7965-download-tc-30-for-windows-7/)
 
