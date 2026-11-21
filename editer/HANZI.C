@@ -16,44 +16,100 @@ time£º2011.9.25
 
 void open_hz(struct EDITTYPE *pEdit)
 {
+	if(pEdit->spell.phz!=NULL)
+	{
+		return;
+	}
 	pEdit->spell.phz=fopen("C://TC30//BIN//hanziku//HZK16", "rb");
 	if(pEdit->spell.phz==NULL)
 	{
-		outtextxy(EDITERSCREENX1, EDITERSCREENY2+5, "Can not open hzk16.\n");
-		getch();
+		pEdit->spell.phz=fopen("hanziku/HZK16", "rb");
 	}
+	if(pEdit->spell.phz==NULL)
+	{
+		outtextxy(EDITERSCREENX1, EDITERSCREENY2+5, "Can not open hzk16.");
+	}
+}
 
+void close_hz(struct EDITTYPE *pEdit)
+{
+	if(pEdit->spell.phz!=NULL)
+	{
+		fclose(pEdit->spell.phz);
+		pEdit->spell.phz=NULL;
+	}
 }
 
 void Get_hz(char incode[], char bytes[], struct EDITTYPE *pEdit)
 {
-	unsigned char qh,wh;
+	unsigned char b0, b1;
 	unsigned long offset;
-	qh=incode[0]-0xa0;
-	wh=incode[1]-0xa0;
-	offset=(94*(qh-1)+(wh-1))*32l;
-	fseek(pEdit->spell.phz, offset, SEEK_SET);
-	fread(bytes, 32, 1, pEdit->spell.phz);
+
+	memset(bytes, 0, 32);
+	if(pEdit->spell.phz==NULL)
+	{
+		return;
+	}
+	b0=(unsigned char)incode[0];
+	b1=(unsigned char)incode[1];
+	if(b0<0xa1 || b1<0xa1)
+	{
+		return;
+	}
+	offset=(94UL*(unsigned long)(b0-0xa1)+(unsigned long)(b1-0xa1))*32UL;
+	if(fseek(pEdit->spell.phz, (long)offset, SEEK_SET)==0)
+	{
+		if(fread(bytes, 32, 1, pEdit->spell.phz)!=1)
+		{
+			memset(bytes, 0, 32);
+		}
+	}
 }
 
 void Displayhz(int x0, int y0, char code[], int color, struct EDITTYPE *pEdit)
 {
-	unsigned char mask[]={0x80,0x40,0x20,0x10,0x08,0x04,0x02,0x01};
-	int i, j, x, y, pos;
+	int i, y, pos;
 	char mat[32];
+	unsigned char byteVal, bitMask;
+
+	if(pEdit->spell.phz==NULL)
+	{
+		open_hz(pEdit);
+		if(pEdit->spell.phz==NULL)
+		{
+			return;
+		}
+	}
 	Get_hz(code, mat, pEdit);
 	y=y0;
 	for(i=0; i<16; i++)
 	{
-		x=x0;
-		pos=2*i;
-		for(j=0; j<16; j++)
+		pos=i<<1;
+		byteVal=(unsigned char)mat[pos];
+		if(byteVal!=0)
 		{
-			if((mask[j%8]&mat[pos+j/8])!=NULL)
+			int x=x0;
+			for(bitMask=0x80; bitMask!=0; bitMask>>=1)
 			{
-				putpixel(x, y, color);
+				if((byteVal&bitMask)!=0)
+				{
+					putpixel(x, y, color);
+				}
+				++x;
 			}
-			++x;
+		}
+		byteVal=(unsigned char)mat[pos+1];
+		if(byteVal!=0)
+		{
+			int x=x0+8;
+			for(bitMask=0x80; bitMask!=0; bitMask>>=1)
+			{
+				if((byteVal&bitMask)!=0)
+				{
+					putpixel(x, y, color);
+				}
+				++x;
+			}
 		}
 		++y;
 	}
@@ -61,20 +117,20 @@ void Displayhz(int x0, int y0, char code[], int color, struct EDITTYPE *pEdit)
 
 void Printfhz(int x, int y, char *s, int color, struct EDITTYPE *pEdit)
 {
-	int x1=x,y1=y;
-	open_hz(pEdit);
-	while(*s!=NULL)
+	int x1=x, y1=y;
+	if(s==NULL)
 	{
-		while( (x1<X_MAX) && (*s!=NULL) )
-		{
-			Displayhz(x1,y1,s,color, pEdit);
-			x1=x1+16;
-			s=s+2;
-		}
+		return;
 	}
-	fclose(pEdit->spell.phz);
+	open_hz(pEdit);
+	if(pEdit->spell.phz==NULL)
+	{
+		return;
+	}
+	while( (x1<X_MAX) && (s[0]!='\0') && (s[1]!='\0') )
+	{
+		Displayhz(x1, y1, s, color, pEdit);
+		x1=x1+16;
+		s=s+2;
+	}
 }
-
-
-
-

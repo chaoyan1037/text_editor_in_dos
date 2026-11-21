@@ -12,6 +12,7 @@ time£º2011.9.12-2011.9.12
 #include"h/struct.h"
 #include"h/common.h"
 #include"h/node.h"
+#include"h/hanzi.h"
 #include"h/malloc.h"
 
 
@@ -25,10 +26,11 @@ struct NODE *MallocNode(struct EDITTYPE *pEdit)
 		closegraph();
 		printf("no enough memory.\n");
 		FreeAllNode(pEdit);
+		close_hz(pEdit);
 		getch();
-		exit(0);
+		exit(1);
 	}
-	
+
 	pNode->last=NULL;
 	pNode->next=NULL;
 	pNode->flag=1;

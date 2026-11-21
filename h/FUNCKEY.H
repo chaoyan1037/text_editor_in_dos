@@ -1,6 +1,8 @@
 #ifndef _FUNCKEY_H_
 #define _FUNCKEY_H_
 
+struct EDITTYPE;
+
 void ExitEditer(struct EDITTYPE *pEdit);
 void MoveCursor(struct EDITTYPE *pEdit);
 void BlackWhiteChoosen(struct EDITTYPE *pEdit);

@@ -7,11 +7,13 @@ time：2011.9.10-2011.10.29
 *********************************************/
 #include<graphics.h>
 #include<conio.h>
+#include<stdio.h>
 #include"h/struct.h"
 #include"h/mouse.h"
 #include"h/spell.h"
 #include"h/common.h"
 #include"h/hanzi.h"
+#include"h/node.h"
 #include"h/drawmenu.h"
 
 void LocateRow(struct EDITTYPE *pEdit, int *pRow);
@@ -21,10 +23,10 @@ void LocateLine(struct EDITTYPE *pEdit, int *pLine);
 void DrawMainMenu(struct EDITTYPE *pEdit)
 {
 	int gd=VGA, gm=VGAHI;
-	//modify the dir according to your case
-	initgraph(&gd,&gm,"C://TC30//BGI");
+	/* modify the dir according to your case */
+	initgraph(&gd, &gm, "C://TC30//BGI");
 	cleardevice();
-	
+
 	setwritemode(COPY_PUT);
 	setfillstyle(SOLID_FILL, LIGHTGRAY);
 	bar(0, 0, 639, 479);
@@ -33,7 +35,7 @@ void DrawMainMenu(struct EDITTYPE *pEdit)
 	bar(EDITERSCREENX1, EDITERSCREENY1, EDITERSCREENX2, EDITERSCREENY2);
 
 	setfillstyle(SOLID_FILL, LIGHTBLUE);
-	bar(0, 0, X_MAX, 25);    /*blue rectangle*/
+	bar(0, 0, X_MAX, 25);    /* blue rectangle */
 	setcolor(BLACK);
 	rectangle(595, 3, 635, 22);
 	WhiteBlack(595, 3, 635, 22, WHITE);
@@ -42,7 +44,7 @@ void DrawMainMenu(struct EDITTYPE *pEdit)
 	DrawMenu2(pEdit);
 	DrawMenu3(pEdit);
 	DrawMenu4(pEdit);
-	
+
 	Printfhz( 400, 5, "汉化的全屏幕编辑器", YELLOW, pEdit);
 	Printfhz( 600, 5, "退出", YELLOW, pEdit);
 
@@ -103,7 +105,7 @@ void DrawMenu4(struct EDITTYPE *pEdit)
 	setcolor(BLACK);
 	rectangle(274, 27, 340, 48);
 	WhiteBlack(274, 27, 340, 48, WHITE);
-}	
+}
 /******************画光标******************/
 void DrawCursor(struct EDITTYPE *pEdit)
 {
@@ -113,75 +115,107 @@ void DrawCursor(struct EDITTYPE *pEdit)
 	if(pEdit->cursorFlag==1)
 	{
 		pEdit->cursorFlag=0;
-		/*查找功能在if语句里就完成了*/
-		if( GetNodePosi(pEdit, pEdit->current, &pEdit->x, &pEdit->y)==0 )
-		{
-			;  /****空语句****/
-		}
+		GetNodePosi(pEdit, pEdit->current, &pEdit->x, &pEdit->y);
 	}
-	x=pEdit->x, y=pEdit->y;
+	x=pEdit->x;
+	y=pEdit->y;
 	if(y>=EDITERSCREENY2)
 	{
-	    y=EDITERSCREENY1+CHARHIGH*CHARINROW;
+		y=EDITERSCREENY1+CHARHIGH*CHARINROW;
 	}
-	line(x,y,x+8,y);
+	line(x, y, x+8, y);
 }
 /****************画滚动条*****************/
 void RollBar(struct EDITTYPE *pEdit)
 {
-	int currentCount=CHARINROW+1;
-	int y=EDITERSCREENY1+14, height=60;
-	struct NODE *pNode=pEdit->start;
-	
-	while(pNode&&pNode!=pEdit->pageFirst)
+	int linesBefore=0;
+	int currentCount;
+	int totalLines;
+	int trackTop=EDITERSCREENY1+16;
+	int trackBottom=EDITERSCREENY2-16;
+	int trackHeight=trackBottom-trackTop;
+	int thumbHeight, thumbY;
+	struct NODE *pNode;
+
+	if(pEdit->lastRollPageFirst==pEdit->pageFirst
+		&& pEdit->tempLineCount==pEdit->lineCount
+		&& pEdit->tempCurrentCount!=0)
 	{
-		if(pNode->firstInLine) /*是否是行首节点*/
+		return;
+	}
+
+	pNode=pEdit->start;
+	while(pNode!=NULL && pNode!=pEdit->pageFirst)
+	{
+		if(pNode->firstInLine) /* 是否是行首节点 */
 		{
-			currentCount++;
+			linesBefore++;
 		}
 		pNode=pNode->next;
 	}
-	if(pEdit->tempCurrentCount!=currentCount||pEdit->tempLineCount!=pEdit->lineCount)
+	currentCount=linesBefore+CHARINROW+1;
+
+	pEdit->lastRollPageFirst=pEdit->pageFirst;
+	pEdit->tempCurrentCount=currentCount;
+	pEdit->tempLineCount=pEdit->lineCount;
+
+	totalLines=linesBefore+pEdit->lineCount+1;
+	if(totalLines<CHARINROW)
 	{
-		pEdit->tempCurrentCount=currentCount;
-		pEdit->tempLineCount=pEdit->lineCount;		
-		if(currentCount>CHARINROW)
+		thumbHeight=60;
+		thumbY=trackTop;
+	}
+	else
+	{
+		int maxScroll=totalLines-CHARINROW;
+		thumbHeight=(int)((long)trackHeight*(long)CHARINROW/(long)totalLines);
+		if(thumbHeight<14)
 		{
-			setfillstyle(SOLID_FILL, LIGHTBLUE);
-			bar(EDITERSCREENX2-20, EDITERSCREENY1, EDITERSCREENX2, EDITERSCREENY2);
-
-			y+=currentCount-CHARINROW;
-			if(y>=EDITERSCREENY2-76)
-			{
-				static i=0;
-				y=EDITERSCREENY2-76+(i/pEdit->tempLineCount);
-				height=height-(i/pEdit->tempLineCount);
-				if(height>=10)
-				{
-					i++;
-				}
-			}
-			setfillstyle(SOLID_FILL, LIGHTGREEN);
-			bar(EDITERSCREENX2-18, y+2, EDITERSCREENX2-2, y+height);
-
-			setwritemode(COPY_PUT);	
-			setcolor(BLACK);
-			rectangle(EDITERSCREENX2-18, y+2, EDITERSCREENX2-2, y+height);	
-
-			moveto(EDITERSCREENX2-18, EDITERSCREENY1+14);
-			lineto(EDITERSCREENX2-2,  EDITERSCREENY1+14);
-			lineto(EDITERSCREENX2-10, EDITERSCREENY1+2);
-			lineto(EDITERSCREENX2-18, EDITERSCREENY1+14);
-			floodfill(EDITERSCREENX2-10, EDITERSCREENY1+5, BLACK);
-
-			moveto(EDITERSCREENX2-18, EDITERSCREENY2-14);
-			lineto(EDITERSCREENX2-2,  EDITERSCREENY2-14);
-			lineto(EDITERSCREENX2-10, EDITERSCREENY2-2);
-			lineto(EDITERSCREENX2-18, EDITERSCREENY2-14);
-			floodfill(EDITERSCREENX2-10, EDITERSCREENY2-5, BLACK);
-
+			thumbHeight=14;
+		}
+		if(thumbHeight>trackHeight)
+		{
+			thumbHeight=trackHeight;
+		}
+		if(maxScroll>0)
+		{
+			thumbY=trackTop+(int)((long)linesBefore*(long)(trackHeight-thumbHeight)/(long)maxScroll);
+		}
+		else
+		{
+			thumbY=trackTop;
+		}
+		if(thumbY<trackTop)
+		{
+			thumbY=trackTop;
+		}
+		if(thumbY+thumbHeight>trackBottom)
+		{
+			thumbY=trackBottom-thumbHeight;
 		}
 	}
+
+	setwritemode(COPY_PUT);
+	setfillstyle(SOLID_FILL, LIGHTBLUE);
+	bar(EDITERSCREENX2-20, EDITERSCREENY1, EDITERSCREENX2, EDITERSCREENY2);
+
+	setfillstyle(SOLID_FILL, LIGHTGREEN);
+	bar(EDITERSCREENX2-18, thumbY, EDITERSCREENX2-2, thumbY+thumbHeight);
+
+	setcolor(BLACK);
+	rectangle(EDITERSCREENX2-18, thumbY, EDITERSCREENX2-2, thumbY+thumbHeight);
+
+	moveto(EDITERSCREENX2-18, EDITERSCREENY1+14);
+	lineto(EDITERSCREENX2-2,  EDITERSCREENY1+14);
+	lineto(EDITERSCREENX2-10, EDITERSCREENY1+2);
+	lineto(EDITERSCREENX2-18, EDITERSCREENY1+14);
+	floodfill(EDITERSCREENX2-10, EDITERSCREENY1+5, BLACK);
+
+	moveto(EDITERSCREENX2-18, EDITERSCREENY2-14);
+	lineto(EDITERSCREENX2-2,  EDITERSCREENY2-14);
+	lineto(EDITERSCREENX2-10, EDITERSCREENY2-2);
+	lineto(EDITERSCREENX2-18, EDITERSCREENY2-14);
+	floodfill(EDITERSCREENX2-10, EDITERSCREENY2-5, BLACK);
 }
 /*********************显示行列********************/
 void ShowPosition(struct EDITTYPE *pEdit)
@@ -189,50 +223,40 @@ void ShowPosition(struct EDITTYPE *pEdit)
 	int x0=pEdit->row;
 	int y0=pEdit->line;
 	int x=0, y=0;
-	char line[6]=":hhh", row[4]=":hh";
+	char line[12], row[8];
 
-	LocateRow(pEdit, &x); 
+	if(pEdit->lastPosCurrent==pEdit->current
+		&& pEdit->lastPosPageFirst==pEdit->pageFirst
+		&& pEdit->lastPosX==pEdit->x
+		&& pEdit->lastPosY==pEdit->y)
+	{
+		return;
+	}
+	pEdit->lastPosCurrent=pEdit->current;
+	pEdit->lastPosPageFirst=pEdit->pageFirst;
+	pEdit->lastPosX=pEdit->x;
+	pEdit->lastPosY=pEdit->y;
+
+	LocateRow(pEdit, &x);
 	LocateLine(pEdit, &y);
-	if(x0!=x||y0!=y)
+	if(x0!=x || y0!=y)
 	{
 		pEdit->row=x;
 		pEdit->line=y;
-		
-		row[1]=x/10+'0';
-		row[2]=x%10+'0';
-		line[1]=y/1000+'0'; /*行最多可显示9999*/
-		line[2]=(y%1000)/100+'0';
-		line[3]=((y%1000)%100)/10+'0';
-		line[4]=((y%1000)%100)%10+'0';
-		if(line[1]-'0'==0)
-		{
-			line[1]=line[2];
-			line[2]=line[3];
-			line[3]=line[4];
-			line[4]='\0';
-			if(line[1]-'0'==0)
-			{
-				line[1]=line[2];
-				line[2]=line[3];
-				line[3]='\0';
-			}
-		}
-		else if(line[1]-'0'==0)
-		{
-			line[1]=line[2];
-			line[2]=line[3];
-			line[3]='\0';
-		}
-			
+
+		sprintf(line, ":%d", y);
+		sprintf(row, ":%d", x);
+
+		setwritemode(COPY_PUT);
 		setfillstyle(SOLID_FILL, LIGHTGRAY);
 		bar(401, 451, 639, 479);
 
 		setcolor(RED);
 		Printfhz(520, 460, "行", RED, pEdit);
 		Printfhz(585, 460, "列", RED, pEdit);
-		
+
 		setcolor(RED);
-		outtextxy(540, 475, line);	
+		outtextxy(540, 475, line);
 		outtextxy(605, 475, row);
 	}
 }
@@ -242,33 +266,33 @@ void LocateRow(struct EDITTYPE *pEdit, int *pRow)
 	int x=pEdit->x;
 	struct NODE *pNode=pEdit->current;
 	*pRow=1;
-	if(x==EDITERSCREENX1)
+	if(x==EDITERSCREENX1 || pNode==NULL)
 	{
 		return;
 	}
-	else
+	for( ; pNode!=NULL && pNode->firstInLine==0; pNode=pNode->last)
 	{
-		for( ; pNode->firstInLine==0; pNode=pNode->last)
-		{
-			if(pNode==NULL)
-			{
-				*pRow=1;
-				return;
-			}
-			(*pRow)++;
-		}
 		(*pRow)++;
-	}	
+	}
+	if(pNode==NULL)
+	{
+		*pRow=1;
+		return;
+	}
+	(*pRow)++;
 }
-/******************locata line********************/
+/******************locate line********************/
 void LocateLine(struct EDITTYPE *pEdit, int *pLine)
 {
 	struct NODE *pNode=pEdit->start;
-	int y=pEdit->y;
-	y=(y-EDITERSCREENY1)/CHARHIGH;
-	while(pNode&&pNode!=pEdit->pageFirst)
+	int y=(pEdit->y-EDITERSCREENY1)/CHARHIGH;
+	if(y<1)
 	{
-		if(pNode->firstInLine) /*是否是行首节点*/
+		y=1;
+	}
+	while(pNode!=NULL && pNode!=pEdit->pageFirst)
+	{
+		if(pNode->firstInLine) /* 是否是行首节点 */
 		{
 			y++;
 		}

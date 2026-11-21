@@ -1,6 +1,8 @@
 #ifndef _DRAWMENU_H_
 #define _DRAWMENU_H_
 
+struct EDITTYPE;
+
 void DrawMainMenu(struct EDITTYPE *pEdit);
 void DrawMenu1(struct EDITTYPE *pEdit);
 void DrawMenu2(struct EDITTYPE *pEdit);

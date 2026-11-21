@@ -1,7 +1,9 @@
 #ifndef _SUBMENUS_H_
 #define _SUBMENUS_H_
 
-void Submenu( struct EDITTYPE *pEdit);
+struct EDITTYPE;
+
+void Submenu(struct EDITTYPE *pEdit);
 void GetSubmenu(struct EDITTYPE *pEdit);
 void ExitSubmenu(struct EDITTYPE *pEdit);
 

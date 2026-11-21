@@ -7,160 +7,117 @@ time：2011.10.5-2011.10.7
 ***********************************************/
 #include<graphics.h>
 #include<bios.h>
-#include"h//common.h"
-#include"h//hanzi.h"
-#include"h//struct.h"
-#include"h//drawmenu.h"
-#include"h//spell.h"
-#include"h//submenus.h"
+#include"h/common.h"
+#include"h/hanzi.h"
+#include"h/struct.h"
+#include"h/drawmenu.h"
+#include"h/spell.h"
+#include"h/mouse.h"
+#include"h/submenus.h"
 
 void SubmenuF1(struct EDITTYPE *pEdit);
 void SubmenuF2(struct EDITTYPE *pEdit);
 void SubmenuF3(struct EDITTYPE *pEdit);
 void SubmenuF4(struct EDITTYPE *pEdit);
 void EnterFunction(struct EDITTYPE *pEdit);
+static void DrawSubmenuBox(int x1, int x2, char *items[], int count, struct EDITTYPE *pEdit);
+
+static void DrawSubmenuBox(int x1, int x2, char *items[], int count, struct EDITTYPE *pEdit)
+{
+	int i;
+	int selY1;
+	int selY2;
+	if(pEdit->submenu.menuflag!=0)
+	{
+		return;
+	}
+	pEdit->submenu.menuflag=1;
+	selY1=50+30*(pEdit->submenu.flag-1);
+	selY2=80+30*(pEdit->submenu.flag-1);
+
+	setfillstyle(SOLID_FILL, YELLOW);
+	bar(x1, 50, x2, 50+30*count);
+
+	setfillstyle(SOLID_FILL, LIGHTGREEN);
+	bar(x1, selY1, x2, selY2);
+
+	setcolor(DARKGRAY);
+	rectangle(x1, selY1, x2, selY2);
+	WhiteBlack(x1, selY1, x2, selY2, WHITE);
+
+	for(i=0; i<count; i++)
+	{
+		Printfhz(x1+2, 55+30*i, items[i], RED, pEdit);
+	}
+}
 
 void SubmenuF1(struct EDITTYPE *pEdit)
 {
-    int i;
-    long int ascii;
-    char *menu[5];
-    if(pEdit->submenu.menuflag==0) //0表示子菜单光条移动过或第一次打开子菜单，需画出子菜单
-    {
-        pEdit->submenu.menuflag=1;     
-        setfillstyle(SOLID_FILL, YELLOW);
-        bar(5, 50, 85, 200);
-
-        setfillstyle(SOLID_FILL,LIGHTGREEN);
-        bar(5, 50+30*(pEdit->submenu.flag-1), 85, 80+30*(pEdit->submenu.flag-1) );
-
-		setcolor(DARKGRAY);
-		rectangle(5, 50+30*(pEdit->submenu.flag-1), 85, 80+30*(pEdit->submenu.flag-1) );
-		WhiteBlack(5, 50+30*(pEdit->submenu.flag-1), 85, 80+30*(pEdit->submenu.flag-1), WHITE);
-
-        menu[0]="打开";
-        menu[1]="新建";
-        menu[2]="保存";
-        menu[3]="另存为";
-        menu[4]="关闭";
-
-        for(i=0; i<5; i++)
-        {
-            Printfhz( 7, 55+30*i, menu[i], RED, pEdit);
-        }
-    } 
-}  
+	char *menu[5];
+	menu[0]="打开";
+	menu[1]="新建";
+	menu[2]="保存";
+	menu[3]="另存为";
+	menu[4]="关闭";
+	DrawSubmenuBox(5, 85, menu, 5, pEdit);
+}
 
 void SubmenuF2(struct EDITTYPE *pEdit)
 {
-    int i;
-    long int ascii;
-    char *menu[4];
-    if(pEdit->submenu.menuflag==0)
-    {
-        pEdit->submenu.menuflag=1;
-        setfillstyle(SOLID_FILL, YELLOW);
-        bar(95, 50, 175, 170);
-
-        setfillstyle(SOLID_FILL,LIGHTGREEN);
-        bar(95, 50+30*(pEdit->submenu.flag-1), 175, 80+30*(pEdit->submenu.flag-1) );
-
-		setcolor(DARKGRAY);
-		rectangle(95, 50+30*(pEdit->submenu.flag-1), 175, 80+30*(pEdit->submenu.flag-1) );
-		WhiteBlack(95, 50+30*(pEdit->submenu.flag-1), 175, 80+30*(pEdit->submenu.flag-1),WHITE);
-
-        menu[0]="剪切";
-        menu[1]="复制";
-        menu[2]="粘贴";
-		menu[3]="全选";
-		
-        for(i=0; i<4; i++)
-        {
-            Printfhz( 97, 55+30*i, menu[i], RED, pEdit);
-        }
-    }  
-}      
+	char *menu[4];
+	menu[0]="剪切";
+	menu[1]="复制";
+	menu[2]="粘贴";
+	menu[3]="全选";
+	DrawSubmenuBox(95, 175, menu, 4, pEdit);
+}
 
 void SubmenuF3(struct EDITTYPE *pEdit)
 {
-    int i;
-    long int ascii;
-    char *menu[2];
-    if(pEdit->submenu.menuflag==0)
-    {
-		pEdit->submenu.menuflag=1;
-		setfillstyle(SOLID_FILL, YELLOW);
-		bar(185, 50, 265, 110);
-		setfillstyle(SOLID_FILL,LIGHTGREEN);
-		bar(185, 50+30*(pEdit->submenu.flag-1), 265, 80+30*(pEdit->submenu.flag-1) );
-
-		setcolor(DARKGRAY);
-		rectangle(185, 50+30*(pEdit->submenu.flag-1), 265, 80+30*(pEdit->submenu.flag-1) );
-		WhiteBlack(185, 50+30*(pEdit->submenu.flag-1), 265, 80+30*(pEdit->submenu.flag-1), WHITE);
-
-		menu[0]="查找";
-		menu[1]="查找替换";
-
-		for(i=0; i<2; i++)
-		{
-			Printfhz( 187, 55+30*i, menu[i], RED, pEdit);
-		}
-    }
+	char *menu[2];
+	menu[0]="查找";
+	menu[1]="查找替换";
+	DrawSubmenuBox(185, 265, menu, 2, pEdit);
 }
 
 void SubmenuF4(struct EDITTYPE *pEdit)
 {
-	int i;
-	long int ascii;
 	char *menu[2];
-	if(pEdit->submenu.menuflag==0)
-	{
-		pEdit->submenu.menuflag=1;
-		setfillstyle(SOLID_FILL, YELLOW);
-		bar(275, 50, 355, 110);
-		setfillstyle(SOLID_FILL, LIGHTGREEN);
-		bar(275, 50+30*(pEdit->submenu.flag-1), 355, 80+30*(pEdit->submenu.flag-1));
-
-		setcolor(DARKGRAY);
-		rectangle(275, 50+30*(pEdit->submenu.flag-1), 355, 80+30*(pEdit->submenu.flag-1) );
-		WhiteBlack(275, 50+30*(pEdit->submenu.flag-1), 355, 80+30*(pEdit->submenu.flag-1), WHITE);
-
-		menu[0]="操作指南";
-		menu[1]="说明";
-		for(i=0; i<2; i++)
-		{
-			Printfhz( 277, 55+30*i, menu[i], RED, pEdit);
-		}
-	}
+	menu[0]="操作指南";
+	menu[1]="说明";
+	DrawSubmenuBox(275, 355, menu, 2, pEdit);
 }
+
 void GetSubmenu(struct EDITTYPE *pEdit)
 {
-   pEdit->submenu.menuflag=0;/*菜单标志位，为0则需画出菜单*/
-   switch(pEdit->state.key)
-   {
-	   case    F1:    pEdit->editActive=1;
-			  break;
-	   case    F2:    pEdit->editActive=2;
-			  break;
-	   case    F3:    pEdit->editActive=3;
-			  break;
-	   case    F4:    pEdit->editActive=4;
-			  break;
-   }
+	pEdit->submenu.menuflag=0; /* 菜单标志位，为0则需画出菜单 */
+	switch(pEdit->state.key)
+	{
+		case F1: pEdit->editActive=1;
+				 break;
+		case F2: pEdit->editActive=2;
+				 break;
+		case F3: pEdit->editActive=3;
+				 break;
+		case F4: pEdit->editActive=4;
+				 break;
+		default: break;
+	}
 }
 
 void Submenu(struct EDITTYPE *pEdit)
 {
 	switch(pEdit->editActive)
 	{
-		case 1:	 SubmenuF1( pEdit );
-		 	 break;
-		case 2:	 SubmenuF2( pEdit );
-			 break;
-		case 3:	 SubmenuF3( pEdit );
-			 break;
-		case 4:	 SubmenuF4( pEdit );
-			 break;
+		case 1: SubmenuF1(pEdit);
+				break;
+		case 2: SubmenuF2(pEdit);
+				break;
+		case 3: SubmenuF3(pEdit);
+				break;
+		case 4: SubmenuF4(pEdit);
+				break;
+		default: break;
 	}
 	if(bioskey(1)!=0)
 	{
@@ -168,83 +125,86 @@ void Submenu(struct EDITTYPE *pEdit)
 
 		switch(pEdit->state.key)
 		{
-			case UP:    if(pEdit->submenu.flag>1)//子菜单中光条位置
-				    {
+			case UP:
+				if(pEdit->submenu.flag>1) /* 子菜单中光条位置 */
+				{
 					pEdit->submenu.flag--;
 					pEdit->submenu.menuflag=0;
-				    }
-					break;
-			case DOWN:  if(pEdit->submenu.flag<pEdit->submenu.SubmenuNum[pEdit->editActive-1])
-				    {
+				}
+				break;
+			case DOWN:
+				if(pEdit->editActive>=1 && pEdit->editActive<=4
+					&& pEdit->submenu.flag<pEdit->submenu.SubmenuNum[pEdit->editActive-1])
+				{
 					pEdit->submenu.flag++;
 					pEdit->submenu.menuflag=0;
-				    }
-					break;
-
-			case ENTER: EnterFunction(pEdit);
-				    break;
-
-			case ESC:   ExitSubmenu(pEdit);
-				    break;
+				}
+				break;
+			case ENTER:
+				EnterFunction(pEdit);
+				break;
+			case ESC:
+				ExitSubmenu(pEdit);
+				break;
+			default:
+				break;
 		}
 	}
 }
-/****************choose shumenu then press ENTER...**********/
+
+/****************choose submenu then press ENTER...**********/
 void EnterFunction(struct EDITTYPE *pEdit)
 {
 	switch(pEdit->editActive)
 	{
-		case 1: switch(pEdit->submenu.flag)
-				{
-					case 1: pEdit->state.function=10;
-							break;
-					case 2: pEdit->state.function=14;
-							break;
-					case 3: pEdit->state.function=9;
-							break;
-					case 4: pEdit->state.function=15;
-							break;
-					case 5:	pEdit->state.function=1;
-							break;
-					default:break;
-				}
-				ExitSubmenu(pEdit);
-				break;  
-		case 2: switch(pEdit->submenu.flag)
-				{
-					case 1: pEdit->state.function=13;
-							break;
-					case 2: pEdit->state.function=12;
-							break;
-					case 3: pEdit->state.function=4;
-							break;
-					case 4: pEdit->state.function=25;
-							break;
-					default:break;
-				}
-				ExitSubmenu(pEdit);
-				break;
-		case 3: switch(pEdit->submenu.flag)
-				{
-					case 1: pEdit->state.function=5;
-							break;
-					case 2: pEdit->state.function=21;
-							break;
-					default:break;
-				}
-				ExitSubmenu(pEdit);
-				break;
-		case 4: switch(pEdit->submenu.flag)
-				{
-					case 1: OperationDirection(pEdit);
-							pEdit->state.mouseFlag=0;
-							break;
-					case 2: Explanation(pEdit);
-							pEdit->state.mouseFlag=0;
-						break;
-					default:break;
-				}
-				break;
+		case 1:
+			switch(pEdit->submenu.flag)
+			{
+				case 1: pEdit->state.function=10; break;
+				case 2: pEdit->state.function=14; break;
+				case 3: pEdit->state.function=9;  break;
+				case 4: pEdit->state.function=15; break;
+				case 5: pEdit->state.function=1;  break;
+				default: break;
+			}
+			ExitSubmenu(pEdit);
+			break;
+		case 2:
+			switch(pEdit->submenu.flag)
+			{
+				case 1: pEdit->state.function=13; break;
+				case 2: pEdit->state.function=12; break;
+				case 3: pEdit->state.function=4;  break;
+				case 4: pEdit->state.function=25; break;
+				default: break;
+			}
+			ExitSubmenu(pEdit);
+			break;
+		case 3:
+			switch(pEdit->submenu.flag)
+			{
+				case 1: pEdit->state.function=5;  break;
+				case 2: pEdit->state.function=21; break;
+				default: break;
+			}
+			ExitSubmenu(pEdit);
+			break;
+		case 4:
+			switch(pEdit->submenu.flag)
+			{
+				case 1:
+					OperationDirection(pEdit);
+					pEdit->state.mouseFlag=0;
+					break;
+				case 2:
+					Explanation(pEdit);
+					pEdit->state.mouseFlag=0;
+					break;
+				default: break;
+			}
+			break;
+		default:
+			break;
 	}
 }
 
@@ -254,29 +214,28 @@ void ExitSubmenu(struct EDITTYPE *pEdit)
 	pEdit->editActive=0;
 	pEdit->submenu.flag=1;
 	pEdit->editFlag=1;
-	settextjustify(LEFT_TEXT,TOP_TEXT);
+	pEdit->state.mouseFlag=0;
+	settextjustify(LEFT_TEXT, TOP_TEXT);
 	switch(temp)
 	{
-		case 1: DrawMenu1(pEdit);
-			break;
-		case 2: DrawMenu2(pEdit);
-			break;
-		case 3: DrawMenu3(pEdit);
-			break;
-		case 4: DrawMenu4(pEdit);
-			break;
+		case 1: DrawMenu1(pEdit); break;
+		case 2: DrawMenu2(pEdit); break;
+		case 3: DrawMenu3(pEdit); break;
+		case 4: DrawMenu4(pEdit); break;
+		default: break;
 	}
-	settextjustify(LEFT_TEXT,BOTTOM_TEXT);	
+	settextjustify(LEFT_TEXT, BOTTOM_TEXT);
 }
+
 /********** Operation Direction***************/
-void  OperationDirection(struct EDITTYPE *pEdit)
+void OperationDirection(struct EDITTYPE *pEdit)
 {
 	int i;
 	char *string[5];
 	setfillstyle(SOLID_FILL, YELLOW);
 	bar(275, 50, 470, 145);
 	setcolor(BLACK);
-	rectangle(275, 50, 470, 145);	
+	rectangle(275, 50, 470, 145);
 	WhiteBlack(275, 50, 470, 145, WHITE);
 
 	string[0]="⒈支持鼠标键盘同时操作";
@@ -290,6 +249,7 @@ void  OperationDirection(struct EDITTYPE *pEdit)
 	}
 	pEdit->editActive=0;
 	pEdit->submenu.flag=1;
+	pEdit->state.functionActive=1;
 }
 
 /************just for a test...*****************/
@@ -300,7 +260,7 @@ void Explanation(struct EDITTYPE *pEdit)
 	setfillstyle(SOLID_FILL, YELLOW);
 	bar(275, 50, 470, 145);
 	setcolor(BLACK);
-	rectangle(275, 50, 470, 145);	
+	rectangle(275, 50, 470, 145);
 	WhiteBlack(275, 50, 470, 145, WHITE);
 
 	string[0]="制作人员";
@@ -315,4 +275,5 @@ void Explanation(struct EDITTYPE *pEdit)
 	}
 	pEdit->editActive=0;
 	pEdit->submenu.flag=1;
+	pEdit->state.functionActive=1;
 }
