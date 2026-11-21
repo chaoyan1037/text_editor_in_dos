@@ -1,16 +1,23 @@
 /*****************************************************************************
  * File: NODE.C
- * Function: Doubly-linked document list operations, clipboard deep-copy/free,
- *           and viewport coordinate <-> node mapping routines.
+ * Purpose: Doubly-linked document list primitives, clipboard deep-copy/free
+ *          routines, and O(page) viewport coordinate <-> node mapping.
  * Programmer: YanChao (2011.9.11-2011.9.15)
  *
- * Key Invariants Maintained by This Module:
- *   1. `start->last == NULL` and `last->next == NULL` whenever non-empty.
- *   2. `current == NULL` represents the caret positioned immediately BEFORE
- *      `pageFirst` (which may or may not equal `start` when scrolled).
- *   3. `GetNodePosi`, `ConvertNodePosi`, `MoveCursorVertical`, and `ViewAll`
- *      share the exact same line-wrapping threshold:
- *        maxX = CHARINLINE * CHARSIZE + EDITERSCREENX1 (605 px).
+ * Core Data-Structure Invariants:
+ *   1. Endpoints: If `start == NULL`, then `last == current == pageFirst == NULL`.
+ *      Otherwise `start->last == NULL` and `last->next == NULL`.
+ *   2. Caret Semantics: `current == NULL` means "immediately before `pageFirst`".
+ *      When scrolled down (`pageFirst != start`), inserting while `current == NULL`
+ *      MUST splice the new node between `pageFirst->last` and `pageFirst` so
+ *      the off-screen prefix of the document is never severed.
+ *   3. Layout Consistency: GetNodePosi(), ConvertNodePosi(),
+ *      MoveCursorVertical(), and ViewAll() all wrap onto the next visual line
+ *      under the exact same rule:
+ *        - `flag == 0` (ENTER): `x = EDITERSCREENX1; y += CHARHIGH;`
+ *        - `flag == 1 or 2`:    `x += flag * CHARSIZE;`
+ *                               if `x >= CHARINLINE*CHARSIZE + EDITERSCREENX1` (605)
+ *                               then `x = EDITERSCREENX1; y += CHARHIGH;`
  *****************************************************************************/
 
 #include<graphics.h>
@@ -20,10 +27,17 @@
 #include"h/struct.h"
 #include"h/node.h"
 
-/*
- * AddNode - Append a new node immediately after `current` (or at document tail).
- * Initializes empty documents cleanly and keeps `last` and `current` synced.
- */
+/*****************************************************************************
+ * Function: AddNode
+ * Purpose:  Allocate a node with payload `data[0..1]` and append it right
+ *           after `pEdit->current` (typically at the document tail).
+ *
+ * @param pEdit Editor context whose document list is mutated.
+ * @param data  At least 2 bytes of payload (`data[1]` is '\0' for ASCII).
+ * @post        `pEdit->current` points to the newly appended node; `pEdit->last`
+ *              is updated if the new node has no successor.
+ * @complexity  O(1).
+ *****************************************************************************/
 void AddNode( struct EDITTYPE *pEdit, char data[] )
 {
 	struct NODE *pNode=MallocNode(pEdit);
@@ -33,13 +47,14 @@ void AddNode( struct EDITTYPE *pEdit, char data[] )
 
 	if(pEdit->start==NULL)
 	{
+		/* Empty document: new node becomes the sole head/tail/pageFirst/current */
 		pNode->firstInLine=1;
 		pEdit->start=pEdit->pageFirst=pEdit->last=pEdit->current=pNode;
 		return;
 	}
 	if(pEdit->current==NULL)
 	{
-		/* Fallback: attach to document tail if current is unset */
+		/* Safety fallback if caller invoked AddNode with current==NULL */
 		pNode->last=pEdit->last;
 		pEdit->last->next=pNode;
 		pEdit->last=pEdit->current=pNode;
@@ -59,16 +74,18 @@ void AddNode( struct EDITTYPE *pEdit, char data[] )
 	pEdit->current=pNode;
 }
 
-/*
- * InsertNode - Insert a new node at the active caret position.
+/*****************************************************************************
+ * Function: InsertNode
+ * Purpose:  Insert a new node at the active caret position (empty document,
+ *           mid-document, tail, or before `pageFirst` when `current == NULL`).
  *
- * Cases handled:
- *   - Empty document (`start == NULL`): creates the single head/tail node.
- *   - Mid/tail document (`current != NULL`): splices right after `current`.
- *   - Top-left of page (`current == NULL`): splices right BEFORE `pageFirst`,
- *     preserving any off-screen predecessor (`pageFirst->last`) when scrolled
- *     so the doubly-linked list remains intact.
- */
+ * @param pEdit Editor context whose document list is mutated.
+ * @param data  2-byte payload copied into the new node.
+ * @post        `pEdit->current` advances to the inserted node. When inserted
+ *              before a scrolled `pageFirst`, `pageFirst->last->next` is
+ *              updated so the doubly-linked list remains unbroken.
+ * @complexity  O(1).
+ *****************************************************************************/
 void InsertNode( struct EDITTYPE *pEdit, char data[] )
 {
 	struct NODE *pNode=MallocNode(pEdit);
@@ -85,7 +102,7 @@ void InsertNode( struct EDITTYPE *pEdit, char data[] )
 
 	if(pEdit->current!=NULL)
 	{
-		/* Splice between current and current->next */
+		/* Splice immediately after `current` (handles both interior and tail) */
 		pNode->next=pEdit->current->next;
 		pNode->last=pEdit->current;
 		if(pEdit->current->next!=NULL)
@@ -101,7 +118,7 @@ void InsertNode( struct EDITTYPE *pEdit, char data[] )
 	}
 	else
 	{
-		/* Insert immediately before pageFirst (caret at top-left of page) */
+		/* Caret sits at top-left of viewport: insert immediately BEFORE pageFirst */
 		struct NODE *pPrev=NULL;
 		if(pEdit->pageFirst!=NULL)
 		{
@@ -112,10 +129,12 @@ void InsertNode( struct EDITTYPE *pEdit, char data[] )
 			pEdit->pageFirst->firstInLine=0;
 			if(pPrev!=NULL)
 			{
+				/* Preserve link to off-screen lines above pageFirst */
 				pPrev->next=pNode;
 			}
 			else
 			{
+				/* Inserted at the very beginning of the document */
 				pEdit->start=pNode;
 			}
 			pNode->firstInLine=1;
@@ -130,13 +149,23 @@ void InsertNode( struct EDITTYPE *pEdit, char data[] )
 	}
 }
 
-/*
- * DeleteNode - Safely unlink and free a single node from the document list.
+/*****************************************************************************
+ * Function: DeleteNode
+ * Purpose:  Unlink and free a single node from the document while maintaining
+ *           every list, viewport, caret, selection, and find-match invariant.
  *
- * Updates `start`, `last`, `pageFirst`, and `current` for all boundary cases
- * (head, tail, sole node, or scrolled `pageFirst`), and invalidates any
- * non-owned selection or find-match references pointing to the freed node.
- */
+ * @param pNode Node to remove and free (no-op if NULL).
+ * @param pEdit Master editor context.
+ * @post        - `pNode` is freed; neither `start`, `last`, `pageFirst`,
+ *                `current`, live `clipStart`/`clipLast`, nor `findStart`/
+ *                `findLast` can dangle to `pNode`.
+ *              - If the sole node was deleted, all document pointers become NULL.
+ *              - If a scrolled `pageFirst` was the final node on screen,
+ *                `pageFirst` walks back to the start of the preceding visual
+ *                line so the viewport does not turn blank.
+ * @complexity  O(1) normally; O(line length) only when deleting the sole node
+ *              on a scrolled page.
+ *****************************************************************************/
 void DeleteNode( struct NODE *pNode, struct EDITTYPE *pEdit )
 {
 	struct NODE *pPrev;
@@ -145,11 +174,12 @@ void DeleteNode( struct NODE *pNode, struct EDITTYPE *pEdit )
 	{
 		return;
 	}
-	/* Capture neighbors before freeing pNode to avoid use-after-free */
+
+	/* Snapshot neighbors BEFORE free(pNode) to eliminate use-after-free */
 	pPrev=pNode->last;
 	pNext=pNode->next;
 
-	/* Stitch surrounding links (or update document start/last) */
+	/* Relink predecessor -> successor (or advance document head) */
 	if(pPrev==NULL)
 	{
 		pEdit->start=pNext;
@@ -159,6 +189,7 @@ void DeleteNode( struct NODE *pNode, struct EDITTYPE *pEdit )
 		pPrev->next=pNext;
 	}
 
+	/* Relink successor -> predecessor (or retreat document tail) */
 	if(pNext==NULL)
 	{
 		pEdit->last=pPrev;
@@ -173,7 +204,7 @@ void DeleteNode( struct NODE *pNode, struct EDITTYPE *pEdit )
 		pEdit->start->firstInLine=1;
 	}
 
-	/* Keep pageFirst valid if the top-left visible node was deleted */
+	/* Repair pageFirst if the top-left visible node was deleted */
 	if(pEdit->pageFirst==pNode)
 	{
 		if(pNext!=NULL)
@@ -183,7 +214,8 @@ void DeleteNode( struct NODE *pNode, struct EDITTYPE *pEdit )
 		}
 		else if(pPrev!=NULL)
 		{
-			/* Walk back to the start of the previous line so viewport stays populated */
+			/* Scrolled past start and deleted the very last node in document:
+			 * step pageFirst back to the beginning of the previous line. */
 			struct NODE *pLine=pPrev;
 			while(pLine->last!=NULL && pLine->firstInLine==0)
 			{
@@ -197,11 +229,12 @@ void DeleteNode( struct NODE *pNode, struct EDITTYPE *pEdit )
 		}
 	}
 
-	/* Retreat caret only if the deleted node was the current caret anchor */
+	/* Update caret ONLY if the deleted node was the current caret anchor */
 	if(pEdit->current==pNode)
 	{
 		if(pPrev==NULL || (pEdit->pageFirst!=NULL && pEdit->pageFirst->last==pPrev))
 		{
+			/* Caret has retreated to top-left of current page */
 			pEdit->current=NULL;
 		}
 		else
@@ -210,7 +243,7 @@ void DeleteNode( struct NODE *pNode, struct EDITTYPE *pEdit )
 		}
 	}
 
-	/* Prevent dangling selection / find pointers into deleted nodes */
+	/* Invalidate non-owning selection or find-match pointers referencing pNode */
 	if(pEdit->copyCutFlag==0 && (pEdit->clipStart==pNode || pEdit->clipLast==pNode))
 	{
 		pEdit->clipStart=NULL;
@@ -225,13 +258,16 @@ void DeleteNode( struct NODE *pNode, struct EDITTYPE *pEdit )
 	free(pNode);
 }
 
-/*
- * FreeAllNode - Release every node in the document and any owned clipboard.
+/*****************************************************************************
+ * Function: FreeAllNode
+ * Purpose:  Free every node in the document list plus any owned detached
+ *           clipboard (`copyCutFlag == 1`), and reset all list/caret fields.
  *
- * Only calls ClearClip() when `copyCutFlag == 1` (detached heap clipboard);
- * if `copyCutFlag == 0`, `clipStart..clipLast` were already freed as part of
- * the main document list, avoiding double-free corruption.
- */
+ * @param pEdit Master editor context.
+ * @post        All document, clipboard, and find pointers are NULL; flags and
+ *              caret coordinates are reset to empty-document defaults.
+ * @complexity  O(N + C) where N = document nodes, C = detached clipboard nodes.
+ *****************************************************************************/
 void FreeAllNode( struct EDITTYPE *pEdit )
 {
 	struct NODE *pNode=pEdit->start;
@@ -242,6 +278,8 @@ void FreeAllNode( struct EDITTYPE *pEdit )
 		free(pNode);
 		pNode=pNext;
 	}
+
+	/* Only free clipboard nodes if they are detached from the main list */
 	if(pEdit->copyCutFlag==1)
 	{
 		ClearClip(pEdit);
@@ -265,16 +303,22 @@ void FreeAllNode( struct EDITTYPE *pEdit )
 	pEdit->y=EDITERSCREENY1+CHARHIGH;
 }
 
-/*
- * ClearClip - Free all heap nodes belonging to a detached clipboard list.
- * Saves `pNext` before freeing each node and terminates cleanly at `clipLast`.
- */
+/*****************************************************************************
+ * Function: ClearClip
+ * Purpose:  Free every heap node belonging to a detached clipboard list.
+ *
+ * @param pEdit Editor context with detached `clipStart..clipLast`.
+ * @pre         Must ONLY be called when `copyCutFlag == 1` (detached nodes).
+ * @post        `clipStart == clipLast == NULL` and `copyCutFlag == 0`.
+ * @complexity  O(C) where C = number of nodes in the clipboard.
+ *****************************************************************************/
 void ClearClip(struct EDITTYPE *pEdit)
 {
 	struct NODE *pNode=pEdit->clipStart;
 	struct NODE *pNext;
 	while(pNode!=NULL)
 	{
+		/* Save successor before freeing, stopping cleanly after clipLast */
 		pNext=(pNode==pEdit->clipLast) ? NULL : pNode->next;
 		free(pNode);
 		pNode=pNext;
@@ -284,14 +328,19 @@ void ClearClip(struct EDITTYPE *pEdit)
 	pEdit->copyCutFlag=0;
 }
 
-/*
- * CopySelection - Deep-copy the live selection (`clipStart..clipLast`) into
- *                 an independent detached clipboard list (Ctrl+C).
+/*****************************************************************************
+ * Function: CopySelection
+ * Purpose:  Implement Ctrl+C by deep-copying the live selection range
+ *           (`clipStart..clipLast`) into a detached heap-allocated list.
  *
- * Detaching the copied data ensures that subsequent edits, deletions, or
- * pasting inside the original selection range cannot corrupt the clipboard
- * or trigger self-referential infinite loops.
- */
+ * @param pEdit Editor context with an active selection (`copyCutFlag == 0`).
+ * @post        - `clipStart..clipLast` points to the new independent copy.
+ *              - `copyCutFlag = 1`, `copyActive = 1`, `clipFlag = 0`.
+ *              - Repeated Ctrl+C presses while `copyCutFlag == 1` are idempotent.
+ * @note        Deep-copying isolates the clipboard from subsequent edits or
+ *              deletions and prevents self-paste infinite loops in Paste().
+ * @complexity  O(S) time and space where S = number of selected nodes.
+ *****************************************************************************/
 void CopySelection(struct EDITTYPE *pEdit)
 {
 	struct NODE *pSrc;
@@ -300,7 +349,7 @@ void CopySelection(struct EDITTYPE *pEdit)
 
 	if(pEdit->copyCutFlag==1)
 	{
-		/* Clipboard already owns a detached copy (e.g., repeated Ctrl+C) */
+		/* Clipboard already owns a detached list; keep it active */
 		if(pEdit->clipStart!=NULL)
 		{
 			pEdit->copyActive=1;
@@ -313,6 +362,7 @@ void CopySelection(struct EDITTYPE *pEdit)
 		return;
 	}
 
+	/* Clone each node in [clipStart .. clipLast] into a standalone list */
 	pSrc=pEdit->clipStart;
 	while(pSrc!=NULL)
 	{
@@ -347,16 +397,19 @@ void CopySelection(struct EDITTYPE *pEdit)
 	pEdit->cursorFlag=1;
 }
 
-/*
- * GetNodePosi - Compute the screen caret coordinate immediately AFTER pGoalNode.
+/*****************************************************************************
+ * Function: GetNodePosi
+ * Purpose:  Compute the screen caret coordinate immediately AFTER `pGoalNode`.
  *
- * Walks forward from `pageFirst` applying the same line-wrap and newline rules
- * as ViewAll(). Clamps Y to EDITERSCREENY2 so the caret stays inside the frame.
- *
- * Returns:
- *   1 if pGoalNode was found from pageFirst (writes *xx and *yy),
- *   0 if pGoalNode is NULL or not reachable from pageFirst (sets top-left on NULL).
- */
+ * @param pEdit     Editor context providing `pageFirst`.
+ * @param pGoalNode Target node whose trailing caret position is requested.
+ * @param xx        Output pointer for pixel X coordinate.
+ * @param yy        Output pointer for baseline pixel Y coordinate.
+ * @return          1 if `pGoalNode` was reached from `pageFirst`;
+ *                  0 if `pageFirst` or `pGoalNode` is NULL (sets top-left)
+ *                  or `pGoalNode` is not reachable from `pageFirst`.
+ * @complexity      O(D) where D = node distance from `pageFirst` to `pGoalNode`.
+ *****************************************************************************/
 int GetNodePosi( struct EDITTYPE *pEdit, struct NODE *pGoalNode, int *xx, int *yy)
 {
 	struct NODE *pNode=pEdit->pageFirst;
@@ -402,16 +455,22 @@ int GetNodePosi( struct EDITTYPE *pEdit, struct NODE *pGoalNode, int *xx, int *y
 	return 0;
 }
 
-/*
- * ConvertNodePosi - Map a pixel click (x, y) to the corresponding caret node.
+/*****************************************************************************
+ * Function: ConvertNodePosi
+ * Purpose:  Map an exact mouse click at pixel (x, y) to the corresponding
+ *           document caret position (`pEdit->current`).
  *
- * Performs a single O(page) pass from `pageFirst`, terminating as soon as
- * `curY > targetY`. Snaps (x, y) to the 8x16 character grid and places
- * `pEdit->current` immediately before the clicked node (`NULL` if clicking
- * `pageFirst`), or at `pEdit->last` if clicking directly after the last char.
- *
- * Returns: 1 if a valid character cell was hit, 0 otherwise.
- */
+ * @param pEdit Editor context whose `current` pointer is updated on hit.
+ * @param x     Click pixel X coordinate.
+ * @param y     Click pixel Y coordinate.
+ * @return      1 if (x, y) landed on a character cell (or immediately after
+ *              the final character of the document); 0 otherwise.
+ * @note        Uses a single O(page) walk starting at `pageFirst` and stops
+ *              as soon as `curY > targetY` (at most 25 visual rows).
+ *              Clicking `pageFirst` sets `current = NULL` (not `pageFirst->last`)
+ *              so scrolled pages keep the caret visible on row 1 col 1.
+ * @complexity  O(page) (~<= 1875 nodes max), independent of total file size.
+ *****************************************************************************/
 int ConvertNodePosi(struct EDITTYPE *pEdit, int x, int y)
 {
 	int targetY, targetColX;
@@ -429,12 +488,13 @@ int ConvertNodePosi(struct EDITTYPE *pEdit, int x, int y)
 		return 0;
 	}
 
-	/* Quantize pixel coordinates to visual row baseline and 8px column start */
+	/* Quantize pixel click to visual row baseline and 8px column left edge */
 	targetY=EDITERSCREENY1+(1+(y-1-EDITERSCREENY1)/CHARHIGH)*CHARHIGH;
 	targetColX=EDITERSCREENX1+((x-EDITERSCREENX1)/CHARSIZE)*CHARSIZE;
 
 	while(pNode!=NULL && curY<=targetY)
 	{
+		/* ENTER occupies an 8px clickable slot at line end; Hanzi occupies 16px */
 		int width=(pNode->flag==2) ? (2*CHARSIZE) : CHARSIZE;
 		if(curY==targetY)
 		{
@@ -462,7 +522,7 @@ int ConvertNodePosi(struct EDITTYPE *pEdit, int x, int y)
 		pNode=pNode->next;
 	}
 
-	/* Allow clicking directly after the final character of the document */
+	/* Also accept clicks directly after the final character on the last line */
 	if(pNode==NULL && curY==targetY && targetColX==curX && pEdit->last!=NULL)
 	{
 		pEdit->current=pEdit->last;
@@ -472,18 +532,22 @@ int ConvertNodePosi(struct EDITTYPE *pEdit, int x, int y)
 	return 0;
 }
 
-/*
- * MoveCursorVertical - Move caret to target row `y` at column closest to `x`.
+/*****************************************************************************
+ * Function: MoveCursorVertical
+ * Purpose:  Move caret vertically onto visual row `y` at the column closest
+ *           to `x` in a single O(page) pass (used by UP and DOWN keys).
  *
- * Used by UP/DOWN arrow handling. Runs in a single O(page) pass from
- * `pageFirst`:
- *   - If target row has a character at column `x`, places caret there.
- *   - If target row is shorter than `x`, clamps caret to the end of that row
- *     (before its trailing ENTER node, or after the last char on the final line).
- *   - Handles empty trailing lines created by a final ENTER node.
- *
- * Returns: 1 if the target row exists and caret was updated, 0 otherwise.
- */
+ * @param pEdit Editor context whose `current` pointer is updated on success.
+ * @param x     Desired column pixel X coordinate.
+ * @param y     Target row baseline pixel Y coordinate.
+ * @return      1 if target row exists and `pEdit->current` was updated,
+ *              0 if target row is beyond the end of the document.
+ * @note        Replaces the original 75x ConvertNodePosi() fallback loop
+ *              (which was O(75 * N^2)) with a single O(page) scan that tracks
+ *              `lastOnLine` to clamp cleanly onto shorter lines and handles
+ *              trailing empty lines after a final ENTER node.
+ * @complexity  O(page).
+ *****************************************************************************/
 int MoveCursorVertical(struct EDITTYPE *pEdit, int x, int y)
 {
 	int targetY, targetColX;
@@ -513,6 +577,7 @@ int MoveCursorVertical(struct EDITTYPE *pEdit, int x, int y)
 		{
 			foundLine=1;
 			lastOnLine=pNode;
+			/* Exact column hit on target row */
 			if(targetColX>=curX && targetColX<curX+width)
 			{
 				pEdit->current=(pNode==pEdit->pageFirst) ? NULL : pNode->last;
@@ -537,22 +602,23 @@ int MoveCursorVertical(struct EDITTYPE *pEdit, int x, int y)
 		pNode=pNode->next;
 	}
 
-	/* Target row was shorter than targetColX: clamp to end of target row */
+	/* Target row exists but ended before targetColX: clamp caret to its end */
 	if(foundLine && lastOnLine!=NULL)
 	{
 		if(lastOnLine->flag==0)
 		{
-			/* Place caret before the newline node so cursor stays on targetY */
+			/* Place caret immediately BEFORE the row's newline node */
 			pEdit->current=(lastOnLine==pEdit->pageFirst) ? NULL : lastOnLine->last;
 		}
 		else
 		{
+			/* Place caret immediately AFTER the final character on the row */
 			pEdit->current=lastOnLine;
 		}
 		return 1;
 	}
 
-	/* Target row is the empty line following a final ENTER node */
+	/* Target row is an empty trailing line following a final ENTER node */
 	if(pNode==NULL && curY==targetY && pEdit->last!=NULL)
 	{
 		pEdit->current=pEdit->last;

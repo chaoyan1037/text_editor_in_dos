@@ -1,16 +1,23 @@
 /*****************************************************************************
  * File: SPELL.H
- * Purpose: Pinyin-to-Hanzi input method editor (IME), candidate pagination,
- *          input-mode status indicator, and custom bitmap for 'àê'.
+ * Purpose: Chinese Pinyin IME (composition, dictionary lookup, candidate
+ *          pagination), Hanzi node insertion, EN/ZH button, and 'àê' glyph.
  *****************************************************************************/
 #ifndef _SPELL_H_
 #define _SPELL_H_
 
 struct EDITTYPE;
 
-void Spell(struct EDITTYPE *pEdit);        /* Read pinyin and pick a Hanzi */
-void Gethanzi(struct EDITTYPE *pEdit);     /* Insert pEdit->spell.pcode node */
-void OutputYao(int x0, int y0, int color); /* Draw hardcoded 16x16 bitmap 'àê' */
-void ShowLanguage(struct EDITTYPE *pEdit); /* Draw bottom-left EN/ZH toggle box */
+/* Run full pinyin input + candidate selection cycle in Chinese mode */
+void Spell(struct EDITTYPE *pEdit);
+
+/* Insert GB2312 pair in pEdit->spell.pcode as a flag=2 document node */
+void Gethanzi(struct EDITTYPE *pEdit);
+
+/* Render hardcoded 16x16 monochrome bitmap for custom glyph 'àê' */
+void OutputYao(int x0, int y0, int color);
+
+/* Render bottom-left EN ("”¢") / ZH ("∫∫") input-mode indicator button */
+void ShowLanguage(struct EDITTYPE *pEdit);
 
 #endif

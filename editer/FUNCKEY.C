@@ -1,8 +1,9 @@
 /*****************************************************************************
  * File: FUNCKEY.C
- * Function: Editor command implementations for cursor navigation, viewport
- *           scrolling, selection highlighting, cut/paste, backspace deletion,
- *           find/replace dialogs, and clean shutdown.
+ * Purpose: Core interactive editing commands: clean shutdown, 4-way cursor
+ *          movement & vertical scrolling, keyboard/mouse text selection,
+ *          cut/paste, single-char backspace, unified ASCII/Hanzi Find, and
+ *          in-place/resizing Find & Replace.
  * Programmer: YanChao (2011.9.15-2011.11.2)
  *****************************************************************************/
 #include<graphics.h>
@@ -28,10 +29,15 @@ int Find(struct EDITTYPE *pEdit, char *pGoal);
 void Dialog(int x0, int y0, int x1, int y1, struct EDITTYPE *pEdit);
 void ChoosenOne(struct EDITTYPE *pEdit, int x, int y);
 
-/*
- * ExitEditer - Tear down graphics mode, release all allocated document and
- *              clipboard nodes, close the HZK16 font handle, and terminate.
- */
+/*****************************************************************************
+ * Function: ExitEditer
+ * Purpose:  Shut down the editor cleanly without returning to main()'s loop.
+ *
+ * @param pEdit Master editor context.
+ * @post        Closes BGI VGA mode, frees all document and detached clipboard
+ *              nodes, closes persistent HZK16 handle, waits for a key, and
+ *              terminates the process via exit(0).
+ *****************************************************************************/
 void ExitEditer(struct EDITTYPE *pEdit)
 {
 	delay(1000);
@@ -43,22 +49,29 @@ void ExitEditer(struct EDITTYPE *pEdit)
 	exit(0);
 }
 
-/*
- * MoveCursor - Erase old caret underline and move `current` according to
- *              `pEdit->state.key` (LEFT, RIGHT, UP, DOWN).
+/*****************************************************************************
+ * Function: MoveCursor
+ * Purpose:  Erase the current caret underline and move `pEdit->current`
+ *           according to `pEdit->state.key` (LEFT, RIGHT, UP, DOWN, or 0 for
+ *           click-reposition refresh).
  *
- * Vertical movement delegates to O(page) MoveCursorVertical(). Pressing UP on
- * the top visible row scrolls `pageFirst` backward by one line; pressing DOWN
- * on the bottom visible row scrolls `pageFirst` forward by one line and sets
- * `pageDownFlag = 1` so the next loop lands the caret on the revealed row.
- */
+ * @param pEdit Master editor context.
+ * @post        Sets `cursorFlag = 1` so DrawCursor() recalculates (x, y).
+ *              At viewport top (row 1) on UP, scrolls `pageFirst` backward one
+ *              line if off-screen lines exist; at viewport bottom (row 25) on
+ *              DOWN, scrolls `pageFirst` forward one line and sets
+ *              `pageDownFlag = 1` so the next loop lands the caret on row 25.
+ * @complexity  O(1) for LEFT/RIGHT; O(page) for UP/DOWN.
+ *****************************************************************************/
 void MoveCursor(struct EDITTYPE *pEdit)
 {
 	int x=pEdit->x, y=pEdit->y;
+
+	/* Overwrite old underline cursor in WHITE before repositioning */
 	setcolor(WHITE);
 	setwritemode(COPY_PUT);
 	line(x, y, x+8, y);
-	pEdit->cursorFlag=1; /* Recompute caret (x, y) on next DrawCursor() */
+	pEdit->cursorFlag=1;
 
 	if(pEdit->state.key==LEFT)
 	{
@@ -70,7 +83,7 @@ void MoveCursor(struct EDITTYPE *pEdit)
 			}
 			else
 			{
-				/* Moving left off pageFirst places caret at top-left (NULL) */
+				/* Stepping left off pageFirst anchors caret at top-left (NULL) */
 				pEdit->current=NULL;
 			}
 		}
@@ -90,7 +103,7 @@ void MoveCursor(struct EDITTYPE *pEdit)
 	{
 		if(y==EDITERSCREENY1+2*CHARHIGH && x==EDITERSCREENX1)
 		{
-			/* Row 2 col 1 -> jump directly to top-left of page */
+			/* Row 2 col 1 -> directly before pageFirst (row 1 col 1) */
 			pEdit->current=NULL;
 		}
 		else if(y>=EDITERSCREENY1+2*CHARHIGH)
@@ -100,7 +113,7 @@ void MoveCursor(struct EDITTYPE *pEdit)
 		}
 		else if(y==EDITERSCREENY1+CHARHIGH)
 		{
-			/* At top row: scroll up one visual line if off-screen text exists */
+			/* Row 1: scroll viewport up one line if off-screen text precedes pageFirst */
 			if(pEdit->pageFirst!=NULL && pEdit->pageFirst->last!=NULL)
 			{
 				struct NODE *pNode=pEdit->pageFirst->last;
@@ -122,7 +135,7 @@ void MoveCursor(struct EDITTYPE *pEdit)
 		}
 		else if(y==EDITERSCREENY2 && pEdit->pageFirst!=NULL)
 		{
-			/* At bottom row: scroll down if at least one more line exists below */
+			/* Row 25: scroll viewport down one line if >= CHARINROW+1 lines remain */
 			int number=0;
 			struct NODE *pNode=pEdit->pageFirst;
 			for( ; pNode!=NULL; pNode=pNode->next)
@@ -154,13 +167,16 @@ void MoveCursor(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * BlackWhiteChoosen - Start or extend a highlighted text selection using
- *                     Ctrl+Left or Ctrl+Right (or mouse hold).
+/*****************************************************************************
+ * Function: BlackWhiteChoosen
+ * Purpose:  Begin or extend a highlighted selection range via Ctrl+Left or
+ *           Ctrl+Right (or mouse hold).
  *
- * Releases any prior detached clipboard before establishing a new live
- * selection range (`copyCutFlag == 0`).
- */
+ * @param pEdit Master editor context.
+ * @post        If a previous detached clipboard existed (`copyCutFlag == 1`),
+ *              frees it first so `clipStart..clipLast` can safely track the
+ *              new live selection inside the document list.
+ *****************************************************************************/
 void BlackWhiteChoosen(struct EDITTYPE *pEdit)
 {
 	if(pEdit->copyCutFlag==1)
@@ -184,10 +200,13 @@ void BlackWhiteChoosen(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * MoveLeft - Highlight the node at `current` and retreat `current` one step
- *            left, expanding `clipStart..clipLast` leftward.
- */
+/*****************************************************************************
+ * Function: MoveLeft
+ * Purpose:  Highlight `pEdit->current` in blue/white, expand `clipStart`
+ *           leftward, and retreat `pEdit->current` by one node.
+ *
+ * @param pEdit Master editor context.
+ *****************************************************************************/
 void MoveLeft(struct EDITTYPE *pEdit)
 {
 	int x=0, y=0;
@@ -199,7 +218,7 @@ void MoveLeft(struct EDITTYPE *pEdit)
 			{
 				if(pEdit->current->flag==0)
 				{
-					/* Highlight newline slot at the end of its preceding line */
+					/* Highlight newline slot at the end of the preceding visual row */
 					if(pEdit->current->last!=NULL
 						&& GetNodePosi(pEdit, pEdit->current->last, &x, &y))
 					{
@@ -210,7 +229,7 @@ void MoveLeft(struct EDITTYPE *pEdit)
 				else
 				{
 					int w=pEdit->current->flag*CHARSIZE;
-					/* Undo soft-wrap if this character ended the previous visual line */
+					/* If GetNodePosi() soft-wrapped to col 0 of next row, step back */
 					if(x==EDITERSCREENX1)
 					{
 						x+=CHARSIZE*CHARINLINE;
@@ -228,7 +247,7 @@ void MoveLeft(struct EDITTYPE *pEdit)
 		}
 		else
 		{
-			/* Highlighting pageFirst itself */
+			/* Selecting pageFirst places caret at top-left (current = NULL) */
 			x=EDITERSCREENX1;
 			y=EDITERSCREENY1+CHARHIGH;
 			ChoosenOne(pEdit, x, y);
@@ -242,10 +261,13 @@ void MoveLeft(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * MoveRight - Advance `current` one step right and highlight the newly
- *             entered node, expanding `clipStart..clipLast` rightward.
- */
+/*****************************************************************************
+ * Function: MoveRight
+ * Purpose:  Advance `pEdit->current` by one node, highlight it in blue/white,
+ *           and expand `clipLast` rightward.
+ *
+ * @param pEdit Master editor context.
+ *****************************************************************************/
 void MoveRight(struct EDITTYPE *pEdit)
 {
 	int x=0, y=0;
@@ -274,13 +296,18 @@ void MoveRight(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * Paste - Insert fresh copies of every node in the detached clipboard
- *         (`clipStart..clipLast`) at the current caret position (Ctrl+V).
+/*****************************************************************************
+ * Function: Paste
+ * Purpose:  Insert newly allocated copies of every node in the detached
+ *           clipboard (`clipStart..clipLast`) at the current caret (Ctrl+V).
  *
- * Requires `copyActive == 1 && copyCutFlag == 1` so Paste() only reads from
- * an independent clipboard list and is safe for repeated or empty-doc pastes.
- */
+ * @param pEdit Master editor context.
+ * @pre         Only runs when `copyActive == 1 && copyCutFlag == 1` (detached
+ *              clipboard owned by CopySelection() or CopyCut()).
+ * @post        Clipboard contents remain intact so Paste() can be invoked
+ *              repeatedly; safe even when pasting into an empty document.
+ * @complexity  O(C) where C = clipboard length.
+ *****************************************************************************/
 void Paste(struct EDITTYPE *pEdit)
 {
 	if(pEdit->copyActive==1 && pEdit->copyCutFlag==1 && pEdit->clipStart!=NULL)
@@ -293,6 +320,7 @@ void Paste(struct EDITTYPE *pEdit)
 		{
 			if(pEdit->start==NULL)
 			{
+				/* Pasting into an empty document creates the initial node cleanly */
 				struct NODE *p=MallocNode(pEdit);
 				p->data[0]=pNode->data[0];
 				p->data[1]=pNode->data[1];
@@ -321,14 +349,21 @@ void Paste(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * CopyCut - Detach the live selection range (`clipStart..clipLast`) from the
- *           document into the clipboard (Ctrl+X), or delete it outright when
- *           invoked via BACKSPACE after Select All.
+/*****************************************************************************
+ * Function: CopyCut
+ * Purpose:  Unlink the live selection span (`clipStart..clipLast`) from the
+ *           document into a detached clipboard (Ctrl+X), or immediately free
+ *           it when invoked by BACKSPACE after Select All.
  *
- * Carefully stitches `prev <-> next` across the removed span and repairs
- * `start`, `last`, `pageFirst`, and `current` for every boundary condition.
- */
+ * @param pEdit Master editor context.
+ * @pre         Only executes when `copyCutFlag == 0` (live document span) so
+ *              repeated Ctrl+X presses cannot corrupt an already-detached clip.
+ * @post        - Main list bridges `clipStart->last <-> clipLast->next`.
+ *              - `start`, `last`, `pageFirst`, and `current` are all repaired.
+ *              - Detached clip has `clipStart->last == NULL` and
+ *                `clipLast->next == NULL` with `copyCutFlag = 1` (or freed if
+ *                invoked via BACKSPACE).
+ *****************************************************************************/
 void CopyCut(struct EDITTYPE *pEdit)
 {
 	if( pEdit->copyCutFlag==0 && pEdit->clipStart!=NULL && pEdit->clipLast!=NULL )
@@ -338,7 +373,7 @@ void CopyCut(struct EDITTYPE *pEdit)
 		int pageFirstCut=0;
 		struct NODE *pScan=pEdit->clipStart;
 
-		/* Detect whether pageFirst falls inside the cut span */
+		/* Check if the cut span encompasses the current viewport start */
 		while(pScan!=NULL)
 		{
 			if(pScan==pEdit->pageFirst)
@@ -353,7 +388,7 @@ void CopyCut(struct EDITTYPE *pEdit)
 			pScan=pScan->next;
 		}
 
-		/* Bridge the gap in the main document list */
+		/* Stitch main document list around the removed span */
 		if(pPrev!=NULL)
 		{
 			pPrev->next=pNext;
@@ -377,7 +412,7 @@ void CopyCut(struct EDITTYPE *pEdit)
 			pEdit->start->firstInLine=1;
 		}
 
-		/* Repair pageFirst if it was removed by the cut */
+		/* Keep viewport populated if pageFirst was inside the cut span */
 		if(pageFirstCut)
 		{
 			if(pNext!=NULL)
@@ -400,7 +435,7 @@ void CopyCut(struct EDITTYPE *pEdit)
 			}
 		}
 
-		/* Position caret immediately before the cut location */
+		/* Position caret immediately before the removed span */
 		if(pPrev==NULL || (pEdit->pageFirst!=NULL && pEdit->pageFirst->last==pPrev))
 		{
 			pEdit->current=NULL;
@@ -410,7 +445,7 @@ void CopyCut(struct EDITTYPE *pEdit)
 			pEdit->current=pPrev;
 		}
 
-		/* Isolate the detached clipboard segment from the document list */
+		/* Sever outer links on the detached clipboard segment */
 		pEdit->clipStart->last=NULL;
 		pEdit->clipLast->next=NULL;
 
@@ -419,7 +454,7 @@ void CopyCut(struct EDITTYPE *pEdit)
 		pEdit->cursorFlag=1;
 		pEdit->editFlag=1;
 
-		/* BACKSPACE deletes the selection without retaining it in the clipboard */
+		/* BACKSPACE deletes the selection outright without keeping it in clipboard */
 		if(pEdit->state.key==BACKSPACE)
 		{
 			ClearClip(pEdit);
@@ -428,7 +463,12 @@ void CopyCut(struct EDITTYPE *pEdit)
 	}
 }
 
-/* BackSpace - Delete the single node immediately preceding the caret */
+/*****************************************************************************
+ * Function: BackSpace
+ * Purpose:  Delete the single node immediately preceding the caret.
+ *
+ * @param pEdit Master editor context (no-op when `current == NULL`).
+ *****************************************************************************/
 void BackSpace(struct EDITTYPE *pEdit)
 {
 	if(pEdit->current!=NULL)
@@ -439,17 +479,21 @@ void BackSpace(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * Find - Search forward from the node after `current` (or from `pageFirst` if
- *        `current == NULL`) for `pGoal` (supports ASCII, GB2312 Hanzi, or mixed).
+/*****************************************************************************
+ * Function: Find
+ * Purpose:  Search forward from the node after `current` (or from `pageFirst`
+ *           when `current == NULL`) for `pGoal`, supporting ASCII, GB2312
+ *           Hanzi, and mixed ASCII+Hanzi queries.
  *
- * On match:
- *   - Records matched node bounds in `findStart..findLast` (leaving clipboard
- *     untouched) and advances `current` to `findLast`.
- *   - Highlights every visible matched node in blue, tracking line wraps.
- *
- * Returns: 1 if found, 0 if not found or `pGoal` is empty.
- */
+ * @param pEdit Master editor context.
+ * @param pGoal NUL-terminated search string.
+ * @return      1 if matched (sets `findStart`, `findLast`, `current=findLast`,
+ *              and highlights all visible matched nodes in blue/white);
+ *              0 if not found or `pGoal` is empty/document is empty.
+ * @note        Uses `findStart`/`findLast` instead of `clipStart`/`clipLast`
+ *              so searching never overwrites or leaks the clipboard.
+ * @complexity  O(N * M) worst-case where N = remaining nodes, M = strlen(pGoal).
+ *****************************************************************************/
 int Find(struct EDITTYPE *pEdit, char *pGoal)
 {
 	struct NODE *pStart;
@@ -474,7 +518,7 @@ int Find(struct EDITTYPE *pEdit, char *pGoal)
 		pStart=pEdit->current->next;
 	}
 
-	/* Naive forward scan matching ASCII (1 byte) and Hanzi (2 bytes) nodes */
+	/* Try matching pGoal starting at each candidate node pStart */
 	for( ; pStart!=NULL; pStart=pStart->next)
 	{
 		int idx=0;
@@ -492,6 +536,7 @@ int Find(struct EDITTYPE *pEdit, char *pGoal)
 			}
 			if(ch>=0x20 && ch<=0x7e)
 			{
+				/* Printable ASCII byte must match a flag=1 node */
 				if(pNode->flag!=1 || pNode->data[0]!=pGoal[idx])
 				{
 					match=0;
@@ -503,6 +548,7 @@ int Find(struct EDITTYPE *pEdit, char *pGoal)
 			}
 			else
 			{
+				/* Non-ASCII lead byte must match a 2-byte GB2312 flag=2 node */
 				if(pGoal[idx+1]=='\0' || pNode->flag!=2
 					|| pNode->data[0]!=pGoal[idx]
 					|| pNode->data[1]!=pGoal[idx+1])
@@ -533,7 +579,7 @@ int Find(struct EDITTYPE *pEdit, char *pGoal)
 		pEdit->findLast=pEnd;
 		pEdit->current=pEnd;
 
-		/* Compute top-left position of pStart on the current page */
+		/* Walk once from pageFirst to find exact top-left (x, y) of pStart */
 		while(pCur!=NULL && pCur!=pStart)
 		{
 			if(pCur->flag==0)
@@ -553,7 +599,7 @@ int Find(struct EDITTYPE *pEdit, char *pGoal)
 			pCur=pCur->next;
 		}
 
-		/* Highlight each matched node in sequence across line wraps */
+		/* Highlight every matched node from pStart..pEnd, honoring line wraps */
 		if(pCur==pStart)
 		{
 			struct NODE *savedCurrent=pEdit->current;
@@ -593,11 +639,15 @@ int Find(struct EDITTYPE *pEdit, char *pGoal)
 	return 0;
 }
 
-/*
- * FindFunction - Show the Find dialog (Ctrl+F) and read up to 13 ASCII chars
- *                into `pEdit->findGoal`. ENTER arms Find (functionActive=5);
- *                ESC cancels cleanly.
- */
+/*****************************************************************************
+ * Function: FindFunction
+ * Purpose:  Display the Find dialog (Ctrl+F) and read up to 13 printable
+ *           ASCII characters into `pEdit->findGoal`.
+ *
+ * @param pEdit Master editor context.
+ * @post        On ENTER: sets `state.functionActive = 5` (awaiting F/C).
+ *              On ESC:   calls CancleFind() and returns to normal editing.
+ *****************************************************************************/
 void FindFunction(struct EDITTYPE *pEdit)
 {
 	int i=0;
@@ -645,16 +695,21 @@ void FindFunction(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * FingGoal - Execute Find() for the active Find (state 5) or Replace (state 6)
- *            dialog and update the dialog prompt/buttons accordingly.
- */
+/*****************************************************************************
+ * Function: FingGoal
+ * Purpose:  Invoke Find() for the active Find (state 5) or Replace (state 6)
+ *           workflow and transition dialog visuals/state accordingly.
+ *
+ * @param pEdit Master editor context.
+ * @post        - Not found: prints "ÌáÊ¾£ºÎ´ÕÒµ½£¡" and sets `functionActive=1`.
+ *              - Found in Replace mode (state 6): changes left button to
+ *                "Ìæ»»(R)" and advances to `functionActive = 7`.
+ *****************************************************************************/
 void FingGoal(struct EDITTYPE *pEdit)
 {
 	setwritemode(COPY_PUT);
 	if( Find(pEdit, &pEdit->findGoal[0])==0 )
 	{
-		/* Not found: show alert message and await dismissal (state 1) */
 		setfillstyle(SOLID_FILL, LIGHTGRAY);
 		if(pEdit->state.functionActive==5)
 		{
@@ -682,7 +737,7 @@ void FingGoal(struct EDITTYPE *pEdit)
 	}
 	else if(pEdit->state.functionActive==6)
 	{
-		/* Match found in Replace workflow: switch action button to "Ìæ»»(R)" */
+		/* Replace workflow: match found -> morph Find(F) button into Replace(R) */
 		pEdit->state.functionActive=7;
 		setwritemode(COPY_PUT);
 		setfillstyle(SOLID_FILL, LIGHTGRAY);
@@ -696,13 +751,14 @@ void FingGoal(struct EDITTYPE *pEdit)
 	}
 }
 
-/* Dialog - Shared dialog chrome used by FindFunction() and FindAndReplace() */
+/* Dialog - Draw shared Find/Replace modal frame, input box, and (F)/(C) buttons */
 void Dialog(int x0, int y0, int x1, int y1, struct EDITTYPE *pEdit)
 {
 	setfillstyle(SOLID_FILL, LIGHTGRAY);
 	bar(x0, y0, x1, y1);
 	button3d(x0, y0, x1, y1);
 
+	/* Green input box (250..389 x 185..205) */
 	setfillstyle(SOLID_FILL, LIGHTGREEN);
 	bar(250, 185, 389, 205);
 
@@ -710,6 +766,7 @@ void Dialog(int x0, int y0, int x1, int y1, struct EDITTYPE *pEdit)
 	rectangle(250, 185, 389, 205);
 	WhiteBlack(250, 185, 389, 205, BLACK);
 
+	/* Find(F) button (258..314 x 214..232) and Cancel(C) (323..379 x 214..232) */
 	setcolor(BLACK);
 	rectangle(258, 214, 314, 232);
 	WhiteBlack(258, 214, 314, 232, WHITE);
@@ -726,7 +783,7 @@ void Dialog(int x0, int y0, int x1, int y1, struct EDITTYPE *pEdit)
 	outtextxy(357, 231, "(C)");
 }
 
-/* CancleFind - Reset Find state and redraw the viewport to clear highlights */
+/* CancleFind - Reset Find state and trigger viewport repaint to clear highlights */
 void CancleFind(struct EDITTYPE *pEdit)
 {
 	pEdit->findStart=NULL;
@@ -736,11 +793,15 @@ void CancleFind(struct EDITTYPE *pEdit)
 	pEdit->editFlag=1;
 }
 
-/*
- * FindAndReplace - Show the Find & Replace dialog (Ctrl+R) and read two fields:
- *                  first `findGoal` (ENTER advances), then `replaceGoal`
- *                  (ENTER arms search with functionActive=6). ESC cancels.
- */
+/*****************************************************************************
+ * Function: FindAndReplace
+ * Purpose:  Display the Find & Replace modal dialog (Ctrl+R) and read both
+ *           `findGoal` (inputFlag=0) and `replaceGoal` (inputFlag=1).
+ *
+ * @param pEdit Master editor context.
+ * @post        First ENTER advances focus from Find box to Replace box;
+ *              second ENTER arms search (`functionActive = 6`). ESC cancels.
+ *****************************************************************************/
 void FindAndReplace(struct EDITTYPE *pEdit)
 {
 	int i=0, j=0, inputFlag=0;
@@ -748,13 +809,13 @@ void FindAndReplace(struct EDITTYPE *pEdit)
 	pEdit->replaceGoal[0]='\0';
 	Dialog(240, 130, 400, 240, pEdit);
 
-	/* Adjust lower input box to leave room for the "Ìæ»»:" label */
+	/* Shorten lower input box left edge to make room for "Ìæ»»:" label */
 	setfillstyle(SOLID_FILL, LIGHTGRAY);
 	bar(250, 185, 288, 205);
 	setcolor(BLACK);
 	line(288, 185, 288, 205);
 
-	/* Draw upper "²éÕÒ:" input box */
+	/* Draw upper "²éÕÒ:" input box (288..389 x 155..175) */
 	setfillstyle(SOLID_FILL, LIGHTGREEN);
 	bar(288, 155, 389, 175);
 	setcolor(WHITE);
@@ -806,7 +867,7 @@ void FindAndReplace(struct EDITTYPE *pEdit)
 			{
 				if(inputFlag==0)
 				{
-					inputFlag=1; /* Switch focus to replacement input box */
+					inputFlag=1;
 				}
 				else
 				{
@@ -845,16 +906,17 @@ void FindAndReplace(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * ReplaceFunction - Replace the matched node range (`findStart..findLast`)
- *                   with `pEdit->replaceGoal`.
+/*****************************************************************************
+ * Function: ReplaceFunction
+ * Purpose:  Replace the document span `[findStart .. findLast]` with the
+ *           ASCII string in `pEdit->replaceGoal`.
  *
- * Handles all three length relations safely:
- *   1. Overwrites existing matched nodes in-place for the shared prefix.
- *   2. Inserts extra nodes via GetEnglish() if `replaceGoal` is longer.
- *   3. Deletes surplus matched nodes (saving `pNext` before DeleteNode()) if
- *      `replaceGoal` is shorter or empty.
- */
+ * @param pEdit Master editor context.
+ * @post        Handles equal-length, longer, shorter, and empty ("")
+ *              replacements safely without use-after-free, clears `findStart`/
+ *              `findLast`/`replaceGoal`, returns to `functionActive = 0`, and
+ *              requests a full viewport & caret redraw.
+ *****************************************************************************/
 void ReplaceFunction(struct EDITTYPE *pEdit)
 {
 	if(pEdit->findStart!=NULL && pEdit->findLast!=NULL)
@@ -863,7 +925,7 @@ void ReplaceFunction(struct EDITTYPE *pEdit)
 		struct NODE *pNode=pEdit->findStart;
 		struct NODE *pEnd=pEdit->findLast;
 
-		/* Phase 1: overwrite existing matched nodes in-place */
+		/* Phase 1: overwrite existing matched nodes in-place for shared prefix */
 		while(pEdit->replaceGoal[i]!='\0' && pNode!=NULL)
 		{
 			pNode->flag=1;
@@ -880,7 +942,7 @@ void ReplaceFunction(struct EDITTYPE *pEdit)
 			pNode=pNode->next;
 		}
 
-		/* Phase 2a: replacement is longer than match -> insert remaining chars */
+		/* Phase 2a: replacement longer than match -> append extra chars */
 		if(pEdit->replaceGoal[i]!='\0')
 		{
 			for( ; pEdit->replaceGoal[i]!='\0'; i++)
@@ -889,14 +951,14 @@ void ReplaceFunction(struct EDITTYPE *pEdit)
 				GetEnglish(pEdit);
 			}
 		}
-		/* Phase 2b: replacement is shorter/empty -> delete excess matched nodes */
+		/* Phase 2b: replacement shorter/empty -> delete leftover matched nodes */
 		else if(pNode!=NULL)
 		{
 			struct NODE *pNext;
 			while(pNode!=NULL)
 			{
 				int isLast=(pNode==pEnd);
-				pNext=pNode->next;
+				pNext=pNode->next; /* Save next BEFORE DeleteNode frees pNode */
 				DeleteNode(pNode, pEdit);
 				if(isLast)
 				{
@@ -915,7 +977,7 @@ void ReplaceFunction(struct EDITTYPE *pEdit)
 	pEdit->findStart=NULL;
 }
 
-/* CancleReplace - Clear Find/Replace state and redraw the viewport */
+/* CancleReplace - Clear Find/Replace state and redraw viewport */
 void CancleReplace(struct EDITTYPE *pEdit)
 {
 	pEdit->findLast=NULL;
@@ -926,11 +988,17 @@ void CancleReplace(struct EDITTYPE *pEdit)
 	pEdit->editFlag=1;
 }
 
-/*
- * AllChosen - Highlight all visible nodes on the current screen page (Ctrl+A)
- *             and enter `functionActive = 13` so Ctrl+C, Ctrl+X, or BACKSPACE
- *             operates on the page selection.
- */
+/*****************************************************************************
+ * Function: AllChosen
+ * Purpose:  Highlight all visible nodes on the current viewport page (Ctrl+A)
+ *           and enter `functionActive = 13` so Ctrl+C, Ctrl+X, or BACKSPACE
+ *           acts on the entire page selection.
+ *
+ * @param pEdit Master editor context (safe no-op on empty documents).
+ * @post        Frees any prior detached clipboard, highlights `pageFirst`
+ *              through `pageLast` (or `last`), restores `current`, and sets
+ *              `clipStart..clipLast` + `functionActive = 13`.
+ *****************************************************************************/
 void AllChosen(struct EDITTYPE *pEdit)
 {
 	struct NODE *pNode=pEdit->pageFirst;
@@ -944,14 +1012,13 @@ void AllChosen(struct EDITTYPE *pEdit)
 		return;
 	}
 
-	/* Free any previous detached clipboard before starting a live selection */
 	if(pEdit->copyCutFlag==1)
 	{
 		ClearClip(pEdit);
 		pEdit->copyActive=0;
 	}
 
-	/* Locate the start of the 25th visible line (if the page is full) */
+	/* Advance to the start of the 25th visible line (if present) */
 	for( ; pNode!=NULL; pNode=pNode->next)
 	{
 		if(pNode->firstInLine==1)
@@ -963,7 +1030,7 @@ void AllChosen(struct EDITTYPE *pEdit)
 			}
 		}
 	}
-	/* Locate the last node on that 25th visible line */
+	/* Find the terminating node of the 25th line (accounting for 2-col Hanzi) */
 	for( ; pNode!=NULL; pNode=pNode->next)
 	{
 		count+=(pNode->flag==0) ? 1 : pNode->flag;
@@ -974,7 +1041,7 @@ void AllChosen(struct EDITTYPE *pEdit)
 		}
 	}
 
-	/* Highlight from pageFirst through pageLast (or document tail) */
+	/* Highlight from pageFirst to pageLast/last (works for 1-node docs too) */
 	pEdit->current=pEdit->pageFirst;
 	pEdit->clipStart=pEdit->pageFirst;
 	pEdit->clipLast=pEdit->pageFirst;
@@ -992,11 +1059,15 @@ void AllChosen(struct EDITTYPE *pEdit)
 	pEdit->state.functionActive=13;
 }
 
-/*
- * ChoosenOne - Render `pEdit->current` inverted (white glyph on blue cell) at
- *              baseline position (x, y), supporting ASCII, newline, GB2312
- *              Hanzi, and the custom 'ˆ' bitmap.
- */
+/*****************************************************************************
+ * Function: ChoosenOne
+ * Purpose:  Render the node at `pEdit->current` with inverted selection
+ *           colors (WHITE foreground on BLUE cell) at baseline (x, y).
+ *
+ * @param pEdit Editor context whose `current` node is drawn.
+ * @param x     Left pixel coordinate of the character cell.
+ * @param y     Baseline pixel coordinate (bottom edge of the 16px cell).
+ *****************************************************************************/
 void ChoosenOne(struct EDITTYPE *pEdit, int x, int y)
 {
 	if(pEdit->current==NULL)
@@ -1028,10 +1099,14 @@ void ChoosenOne(struct EDITTYPE *pEdit, int x, int y)
 	}
 }
 
-/*
- * MouseBWChosen - Distinguish a quick click (move caret) from a ~100ms button
- *                 hold (extend selection rightward via function 24).
- */
+/*****************************************************************************
+ * Function: MouseBWChosen
+ * Purpose:  Poll the mouse button for up to ~100ms (50 x 2ms) after a viewport
+ *           click to distinguish a quick click (move caret) from a press-and-
+ *           hold (queue function 24 / CTRL_RIGHT to extend text selection).
+ *
+ * @param pEdit Master editor context.
+ *****************************************************************************/
 void MouseBWChosen(struct EDITTYPE *pEdit)
 {
 	int i=0;

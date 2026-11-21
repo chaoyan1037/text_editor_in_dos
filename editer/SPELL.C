@@ -1,19 +1,31 @@
 /*****************************************************************************
  * File: SPELL.C
- * Function: Chinese Pinyin Input Method Editor (IME) for DOS.
+ * Purpose: Chinese Pinyin Input Method Editor (IME) for DOS.
  * Programmer: XiaoYao (2011.9.25)
  *
- * Workflow:
- *   1. When `language == 1` and the user presses 'a'..'z', Spell() launches
- *      InputPinYin() to read a pinyin syllable (up to 10 chars) terminated by
- *      SPACE (or cancelled with ESC).
- *   2. OutputHanZi() loads the matching GB2312 candidate table from
- *      `spell/<pinyin>.txt` via GetCode(), displaying 4 candidates per page.
- *   3. '-' (JIANHAO) and '=' (DENGHAO) page backward/forward; '1'..'4' or
- *      SPACE commits the selected character via Gethanzi(); ESC cancels.
- *   4. Special Easter-egg / author glyph: 'àê' (not present in GB2312 HZK16)
- *      is encoded as two spaces (' ', ' ') with flag=2, selectable via pinyin
- *      "v" or slot 4 on page 8 of "yao", and drawn by OutputYao().
+ * Pinyin IME State Flow:
+ *
+ *   ['a'..'z' in ZH mode]
+ *           |
+ *           v
+ *    InputPinYin()  ----(ESC or empty SPACE)----> clear IME bar & return
+ *           |
+ *      (SPACE with non-empty pinyin)
+ *           |
+ *           v
+ *     OutputHanZi()
+ *       |-- pinYin == "v" -------> insert custom 'àê' (' ',' ', flag=2)
+ *       |-- GetCode(pinYin) -----> load GB2312 pairs from `spell/<pin>.txt`
+ *       |        |
+ *       |        v
+ *       |   Candidate Loop (4 chars/page, integer index `idx = page*4 + slot`):
+ *       |     '=' (DENGHAO) : next page if (page+1)*4 < totalChars
+ *       |     '-' (JIANHAO) : prev page if page > 0
+ *       |     '1'..'4'/SPACE: commit candidate via Gethanzi() & exit
+ *       |     ESC           : cancel without inserting & exit
+ *       |
+ *       +-- Special case: `yao.txt` has 35 Hanzi (pages 0..7 full, page 8 has
+ *           3 chars in slots 0..2); slot 3 on page 8 displays custom 'àê'.
  *****************************************************************************/
 #include<graphics.h>
 #include<string.h>
@@ -35,10 +47,14 @@ void OutputHanZi(int x, int y, char *pinYin, struct EDITTYPE *pEdit);
 int GetCode(char *tcode, int maxLen, char *pin);
 static void DrawHanZiPage(int x, int y, char *code, int totalChars, int page, int isYao, struct EDITTYPE *pEdit);
 
-/*
- * Spell - Top-level entry point for one Chinese pinyin input cycle.
- * Clears the IME bar automatically if the user cancels pinyin entry.
- */
+/*****************************************************************************
+ * Function: Spell
+ * Purpose:  Execute one complete Chinese pinyin composition & selection cycle.
+ *
+ * @param pEdit Editor context with initial trigger letter in `state.ascii`.
+ * @post        Either inserts one Hanzi node (setting `editFlag=1`) or clears
+ *              the bottom IME bar cleanly on cancel/lookup failure.
+ *****************************************************************************/
 void Spell(struct EDITTYPE *pEdit)
 {
 	char pinYin[11];
@@ -48,18 +64,22 @@ void Spell(struct EDITTYPE *pEdit)
 	}
 	else
 	{
+		/* Erase pinyin box on ESC cancel or empty SPACE */
 		setfillstyle(SOLID_FILL, LIGHTGRAY);
 		bar(100, 451, 400, 479);
 	}
 }
 
-/*
- * InputPinYin - Read a pinyin syllable (up to 10 lowercase letters/digits)
- *               into `pinYin`, seeded with the initial letter in `state.ascii`.
+/*****************************************************************************
+ * Function: InputPinYin
+ * Purpose:  Collect up to 10 lowercase pinyin letters/digits in the bottom
+ *           composition box (X=100..175, Y=455..475).
  *
- * Returns: 1 if a non-empty pinyin was confirmed with SPACE, 0 if cancelled
- *          with ESC or confirmed while empty.
- */
+ * @param pinYin Output buffer (at least 11 bytes) receiving the syllable.
+ * @param pEdit  Editor context supplying the first letter in `state.ascii`.
+ * @return       1 if user pressed SPACE with >= 1 char; 0 if cancelled (ESC)
+ *               or confirmed empty.
+ *****************************************************************************/
 int InputPinYin(char *pinYin, struct EDITTYPE *pEdit)
 {
 	long int key;
@@ -68,12 +88,12 @@ int InputPinYin(char *pinYin, struct EDITTYPE *pEdit)
 	pinYin[0]='\0';
 	while(1)
 	{
-		/* Consume the initial 'a'..'z' keypress that triggered Spell() */
+		/* Seed composition buffer with the initial 'a'..'z' key from main() */
 		if( pEdit->state.ascii>='a'&&pEdit->state.ascii<='z' )
 		{
 			pinYin[0]=(char)pEdit->state.ascii;
 			pinYin[1]='\0';
-			pEdit->state.ascii='a'-1; /* Mark seed letter consumed */
+			pEdit->state.ascii='a'-1; /* Sentinel: seed already consumed */
 			Shurukuang(100, 455, 175, 475, pinYin);
 			i=1;
 		}
@@ -88,7 +108,7 @@ int InputPinYin(char *pinYin, struct EDITTYPE *pEdit)
 				pinYin[0]='\0';
 				return 0;
 			}
-			else if(key==SPACE) /* Confirm pinyin and open candidate list */
+			else if(key==SPACE) /* Finish syllable and show candidates */
 			{
 				pinYin[i]='\0';
 				Shurukuang(100, 455, 175, 475, pinYin);
@@ -105,6 +125,7 @@ int InputPinYin(char *pinYin, struct EDITTYPE *pEdit)
 			}
 			else if( ((letter>='a'&&letter<='z')||(letter>='0'&&letter<='9')) && i<10 )
 			{
+				/* Digits '0'..'9' are supported for symbol tables v1.txt..v9.txt */
 				pinYin[i]=(char)letter;
 				pinYin[i+1]='\0';
 				i++;
@@ -114,11 +135,18 @@ int InputPinYin(char *pinYin, struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * DrawHanZiPage - Render up to 4 candidate Hanzi for 0-based `page` inside
- *                 the bottom candidate bar. For pinyin "yao" on page 8, also
- *                 draws the custom 'àê' bitmap in slot 4.
- */
+/*****************************************************************************
+ * Function: DrawHanZiPage
+ * Purpose:  Repaint the candidate bar with up to 4 Hanzi glyphs for `page`.
+ *
+ * @param x          Left X pixel for slot 0 (typically 217, stride 48 px).
+ * @param y          Top Y pixel for candidate glyphs (typically 457).
+ * @param code       Contiguous buffer of 2-byte GB2312 candidate pairs.
+ * @param totalChars Total number of GB2312 characters in `code`.
+ * @param page       0-based page index (each page displays `page*4 .. page*4+3`).
+ * @param isYao      1 if `pinYin` is "yao" (enables 'àê' in slot 3 on page 8).
+ * @param pEdit      Editor context providing HZK16 font access.
+ *****************************************************************************/
 static void DrawHanZiPage(int x, int y, char *code, int totalChars, int page, int isYao, struct EDITTYPE *pEdit)
 {
 	int k;
@@ -129,7 +157,7 @@ static void DrawHanZiPage(int x, int y, char *code, int totalChars, int page, in
 	for(k=0; k<4 && (base+k)<totalChars && xx<X_MAX; k++)
 	{
 		Displayhz(xx, y, &code[(base+k)*2], BLACK, pEdit);
-		xx+=16*3;
+		xx+=16*3; /* 16px glyph + 32px spacing for "N. " label */
 	}
 	if(isYao && page==8)
 	{
@@ -137,17 +165,21 @@ static void DrawHanZiPage(int x, int y, char *code, int totalChars, int page, in
 	}
 }
 
-/*
- * OutputHanZi - Display paginated GB2312 candidates for `pinYin` and commit
- *               the user's chosen character into the document.
+/*****************************************************************************
+ * Function: OutputHanZi
+ * Purpose:  Look up GB2312 candidates for `pinYin`, run the interactive page
+ *           selection loop, and insert the chosen character via Gethanzi().
  *
- * Uses 0-based integer page/slot indexing (`idx = page*4 + choice`) rather
- * than pointer arithmetic so out-of-range slots are safely ignored instead of
- * causing buffer overruns or NULL dereferences.
- */
+ * @param x      Initial candidate slot X coordinate (217).
+ * @param y      Candidate glyph top Y coordinate (457).
+ * @param pinYin NUL-terminated pinyin syllable entered by the user.
+ * @param pEdit  Master editor context.
+ * @note         Uses bounds-checked integer indexing (`idx = page*4 + choice`)
+ *               so pressing a key for an empty trailing slot is safely ignored.
+ *****************************************************************************/
 void OutputHanZi(int x, int y, char *pinYin, struct EDITTYPE *pEdit)
 {
-	char code[300];
+	char code[300]; /* Largest dictionary file (yi.txt) is 220 bytes */
 	long int key;
 	int letter;
 	int totalChars=0;
@@ -157,7 +189,7 @@ void OutputHanZi(int x, int y, char *pinYin, struct EDITTYPE *pEdit)
 
 	code[0]='\0';
 
-	/* Shorthand "v" inserts custom character 'àê' directly */
+	/* Shorthand pinyin "v" inserts custom character 'àê' directly */
 	if( (pinYin[0]=='v')&&(pinYin[1]=='\0') )
 	{
 		pEdit->spell.pcode[0]=' ';
@@ -185,6 +217,7 @@ void OutputHanZi(int x, int y, char *pinYin, struct EDITTYPE *pEdit)
 	open_hz(pEdit);
 	DrawHanZiPage(x, y, code, totalChars, page, isYao, pEdit);
 
+	/* Modal candidate selection loop */
 	while(1)
 	{
 		if(bioskey(1)!=0)
@@ -198,7 +231,7 @@ void OutputHanZi(int x, int y, char *pinYin, struct EDITTYPE *pEdit)
 				bar(100, 451, 400, 479);
 				break;
 			}
-			else if(key==DENGHAO) /* '=' key: next page */
+			else if(key==DENGHAO) /* '=' advances to next page of 4 candidates */
 			{
 				if((page+1)*4<totalChars)
 				{
@@ -206,7 +239,7 @@ void OutputHanZi(int x, int y, char *pinYin, struct EDITTYPE *pEdit)
 					DrawHanZiPage(217, 457, code, totalChars, page, isYao, pEdit);
 				}
 			}
-			else if(key==JIANHAO) /* '-' key: previous page */
+			else if(key==JIANHAO) /* '-' returns to previous page */
 			{
 				if(page>0)
 				{
@@ -218,6 +251,8 @@ void OutputHanZi(int x, int y, char *pinYin, struct EDITTYPE *pEdit)
 			{
 				int idx;
 				choice=(key==SPACE) ? 0 : (letter-'1');
+
+				/* Special slot 4 on page 8 of "yao" commits custom 'àê' */
 				if(isYao && page==8 && choice==3)
 				{
 					pEdit->spell.pcode[0]=' ';
@@ -227,6 +262,7 @@ void OutputHanZi(int x, int y, char *pinYin, struct EDITTYPE *pEdit)
 					bar(100, 451, 400, 479);
 					break;
 				}
+
 				idx=page*4+choice;
 				if(idx<totalChars)
 				{
@@ -242,13 +278,17 @@ void OutputHanZi(int x, int y, char *pinYin, struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * GetCode - Load the GB2312 candidate bytes for pinyin `pin` into `tcode`.
+/*****************************************************************************
+ * Function: GetCode
+ * Purpose:  Read the GB2312 candidate table `spell/<pin>.txt` into `tcode`.
  *
- * Reads at most `maxLen - 1` bytes using an `int` buffer for fgetc() so EOF
- * cannot be confused with 0xFF bytes, stripping any CR/LF line breaks.
- * Returns: 1 on success, 0 if the pinyin dictionary file does not exist.
- */
+ * @param tcode  Destination buffer for NUL-terminated GB2312 byte pairs.
+ * @param maxLen Total capacity of `tcode` in bytes (including NUL).
+ * @param pin    Pinyin syllable name (up to 10 chars, without ".txt").
+ * @return       1 on success; 0 if file is missing or arguments are invalid.
+ * @note         Uses `int ch = fgetc(fp)` so EOF (-1) is never confused with
+ *               high bytes (0x80..0xFF), and strips CR/LF bytes.
+ *****************************************************************************/
 int GetCode(char *tcode, int maxLen, char *pin)
 {
 	int i=0;
@@ -265,6 +305,7 @@ int GetCode(char *tcode, int maxLen, char *pin)
 		return 0;
 	}
 
+	/* Try original TC 3.0 spell path first, then relative "spell/" */
 	sprintf(routine, "C://TC30//BIN//spell//%.10s.txt", pin);
 	fp=fopen(routine, "rt");
 	if(fp==NULL)
@@ -293,7 +334,7 @@ int GetCode(char *tcode, int maxLen, char *pin)
 	return 1;
 }
 
-/* Shurukuang - Draw the bottom pinyin composition box with current text */
+/* Shurukuang - Repaint the recessed green pinyin box with BLACK text */
 void Shurukuang(int x1, int y1, int x2, int y2, char *pinYin)
 {
 	setfillstyle(SOLID_FILL, LIGHTGREEN);
@@ -305,7 +346,7 @@ void Shurukuang(int x1, int y1, int x2, int y2, char *pinYin)
 	WhiteBlack(x1, y1, x2, y2, BLACK);
 }
 
-/* Hanzikuang - Draw the numbered "1. 2. 3. 4." Hanzi candidate bar frame */
+/* Hanzikuang - Repaint the green candidate bar with "1. 2. 3. 4." slot labels */
 void Hanzikuang(int x1, int y1, int x2, int y2)
 {
 	setfillstyle(SOLID_FILL, LIGHTGREEN);
@@ -317,10 +358,15 @@ void Hanzikuang(int x1, int y1, int x2, int y2)
 	WhiteBlack(x1, y1, x2, y2, BLACK);
 }
 
-/*
- * Gethanzi - Insert the 2-byte GB2312 character stored in `pEdit->spell.pcode`
- *            as a document NODE with `flag = 2` at the active caret position.
- */
+/*****************************************************************************
+ * Function: Gethanzi
+ * Purpose:  Insert the 2-byte GB2312 glyph in `pEdit->spell.pcode[0..1]` at
+ *           the active caret position as a `flag = 2` document node.
+ *
+ * @param pEdit Master editor context with `spell.pcode[0..1]` populated.
+ * @post        Inserts node at `pEdit->current` and sets `editFlag=1`,
+ *              `cursorFlag=1`. Safe when document is empty or `current==NULL`.
+ *****************************************************************************/
 void Gethanzi(struct EDITTYPE *pEdit)
 {
 	char data[3]="hh";
@@ -352,7 +398,13 @@ void Gethanzi(struct EDITTYPE *pEdit)
 	}
 }
 
-/* ShowLanguage - Draw the bottom-left EN ("”¢") / ZH ("∫∫") indicator button */
+/*****************************************************************************
+ * Function: ShowLanguage
+ * Purpose:  Draw the bottom-left EN ("”¢") / ZH ("∫∫") indicator button
+ *           (X=5..28, Y=455..475) and clear the IME bar when switching to EN.
+ *
+ * @param pEdit Master editor context providing `language`.
+ *****************************************************************************/
 void ShowLanguage(struct EDITTYPE *pEdit)
 {
 	setfillstyle(SOLID_FILL, LIGHTGRAY);
@@ -373,13 +425,18 @@ void ShowLanguage(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * OutputYao - Render the hardcoded 16x16 monochrome bitmap for 'àê' (not in
- *             GB2312 HZK16) at top-left (x0, y0) using the same byte-skipping
- *             scanline loop as Displayhz().
- */
+/*****************************************************************************
+ * Function: OutputYao
+ * Purpose:  Plot the hardcoded 16x16 dot-matrix bitmap for 'àê' (three Õ¡
+ *           radicals, absent from GB2312-80 HZK16) at top-left (x0, y0).
+ *
+ * @param x0    Left pixel coordinate of the 16x16 glyph cell.
+ * @param y0    Top pixel coordinate of the 16x16 glyph cell.
+ * @param color BGI palette color index.
+ *****************************************************************************/
 void OutputYao(int x0, int y0, int color)
 {
+	/* 16 rows x 2 bytes/row (MSB = leftmost pixel), identical to HZK16 layout */
 	static const unsigned char mat[32]={
 		0x01,0x00,0x01,0x00,0x3F,0xF8,0x01,0x00,
 		0x01,0x00,0x01,0x00,0xFF,0xFE,0x10,0x10,

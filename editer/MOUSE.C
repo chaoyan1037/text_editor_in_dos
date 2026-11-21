@@ -1,8 +1,20 @@
 /*****************************************************************************
  * File: MOUSE.C
- * Function: DOS INT 33h mouse driver wrapper, XOR software cursor drawing,
- *           modal/menu/editor click hit-testing, and 3D bevel button effects.
+ * Purpose: DOS INT 33h mouse driver wrapper, XOR software cursor renderer,
+ *          modal/viewport/button/menu click hit-testing, and 3D bevel helpers.
  * Programmer: XiaoYao (2011.9.10-2011.11.4)
+ *
+ * DOS Mouse Driver (INT 33h) Functions Used:
+ *   - AX = 0x0000: Reset driver & query presence (returns AX != 0 if present).
+ *   - AX = 0x0003: Read position (CX=X, DX=Y) and button bitmask (BX, 1=left).
+ *   - AX = 0x0007: Set horizontal cursor clamp [CX .. DX].
+ *   - AX = 0x0008: Set vertical cursor clamp [CX .. DX].
+ *
+ * XOR Software Pointer Protocol:
+ *   - Hardware mouse cursors do not work cleanly over BGI VGAHI graphics, so
+ *     ShowMouse() draws a 9x17 arrow outline in XOR_PUT mode.
+ *   - Any routine that repaints part of the screen over the pointer resets
+ *     `state.mouseFlag = 0` so ShowMouse() will NOT XOR-erase a missing arrow.
  *****************************************************************************/
 #include<graphics.h>
 #include<stdlib.h>
@@ -23,13 +35,13 @@ void Submenu3Op(struct EDITTYPE *pEdit);
 void Submenu4Op(struct EDITTYPE *pEdit);
 void ChooseSubmenu(struct EDITTYPE *pEdit);
 
-/*
- * InitMouse - Initialize DOS mouse driver (INT 33h) and clamp pointer motion
- *             to the 640x480 screen bounds.
- *   AX=0: Reset driver and detect presence (returns 0 if no mouse installed)
- *   AX=7: Set horizontal min/max (CX..DX)
- *   AX=8: Set vertical min/max (CX..DX)
- */
+/*****************************************************************************
+ * Function: InitMouse
+ * Purpose:  Reset the DOS mouse driver via INT 33h and clamp pointer travel
+ *           within [2..X_MAX-1] x [2..Y_MAX-1].
+ *
+ * @return   Non-zero mouse status code on success; 0 if no driver detected.
+ *****************************************************************************/
 int InitMouse(void)
 {
 	int retcode;
@@ -37,6 +49,7 @@ int InitMouse(void)
 	int xmin=2, xmax=X_MAX-1;
 	int ymin=2, ymax=Y_MAX-1;
 
+	/* AX=0: Reset mouse driver and test installation */
 	regs.x.ax=0;
 	int86(MOUSEID, &regs, &regs);
 	retcode=regs.x.ax;
@@ -46,11 +59,13 @@ int InitMouse(void)
 		return 0;
 	}
 
+	/* AX=7: Horizontal travel bounds */
 	regs.x.ax=7;
 	regs.x.cx=xmin;
 	regs.x.dx=xmax;
 	int86(MOUSEID, &regs, &regs);
 
+	/* AX=8: Vertical travel bounds */
 	regs.x.ax=8;
 	regs.x.cx=ymin;
 	regs.x.dx=ymax;
@@ -59,10 +74,12 @@ int InitMouse(void)
 	return retcode;
 }
 
-/*
- * ReadMouse - Poll current pointer coordinates (CX, DX) and button state (BX)
- *             via INT 33h function AX=3.
- */
+/*****************************************************************************
+ * Function: ReadMouse
+ * Purpose:  Poll current pointer coordinates and button mask via INT 33h/AX=3.
+ *
+ * @param pEdit Editor context whose `state.{x,y,button}` fields are updated.
+ *****************************************************************************/
 void ReadMouse(struct EDITTYPE *pEdit)
 {
 	union REGS regs;
@@ -75,7 +92,7 @@ void ReadMouse(struct EDITTYPE *pEdit)
 	pEdit->state.button=regs.x.bx;
 }
 
-/* DrawMouse - Outline the arrow pointer at (state.x, state.y) in active mode */
+/* DrawMouse - Plot the 7-segment arrow cursor outline at (state.x, state.y) */
 void DrawMouse(struct MOUSESTATE state)
 {
 	int x=state.x, y=state.y;
@@ -89,12 +106,14 @@ void DrawMouse(struct MOUSESTATE state)
 	line(x,y+12,x,y);
 }
 
-/*
- * ShowMouse - Poll mouse movement and update the XOR software pointer.
+/*****************************************************************************
+ * Function: ShowMouse
+ * Purpose:  Poll mouse movement and update the XOR software arrow cursor.
  *
- * When the pointer moves, XOR-erases the previous arrow (only if `mouseFlag`
- * indicates it is still visible on screen) and XOR-draws it at the new position.
- */
+ * @param pEdit Master editor context.
+ * @post        If the pointer moved, erases old arrow (when `mouseFlag==1`),
+ *              draws new arrow, sets `mouseFlag=1`, and restores COPY_PUT.
+ *****************************************************************************/
 void ShowMouse(struct EDITTYPE *pEdit)
 {
 	struct MOUSESTATE state0;
@@ -114,14 +133,24 @@ void ShowMouse(struct EDITTYPE *pEdit)
 	setwritemode(COPY_PUT);
 }
 
-/*
- * MouseKey - Dispatch mouse clicks across modal dialogs, editor text area,
- *            title/status buttons, scrollbar arrows, and pull-down menus.
+/*****************************************************************************
+ * Function: MouseKey
+ * Purpose:  Central mouse hit-tester and click dispatcher for all UI regions.
  *
- * Modal dialog hit-testing is strictly gated on `fa != 0` so invisible dialog
- * coordinates cannot create dead click zones inside the text editor when no
- * dialog is active.
- */
+ * Dispatch Priority:
+ *   1. Active modal dialog buttons (ONLY when `functionActive != 0 && b == 1`,
+ *      preventing invisible dialogs from creating dead click zones over text).
+ *   2. Viewport text clicks (when `fa==0 && editActive==0`, excluding the
+ *      right-hand 20px scrollbar) -> ConvertNodePosi() + MouseBWChosen().
+ *   3. Top-right Exit button (595..635 x 3..22) and bottom-left EN/ZH toggle
+ *      (5..28 x 455..475).
+ *   4. Scrollbar up/down arrows (616..632 x 52..64 / 436..448).
+ *   5. Top menu bar buttons and open pull-down submenus via ChooseSubmenu().
+ *
+ * @param pEdit Master editor context.
+ * @note        100ms delays after click actions serve as simple DOS button
+ *              debouncing so a single click does not fire twice across frames.
+ *****************************************************************************/
 void MouseKey(struct EDITTYPE *pEdit)
 {
 	int x=pEdit->state.x;
@@ -130,10 +159,10 @@ void MouseKey(struct EDITTYPE *pEdit)
 	int fa=pEdit->state.functionActive;
 	setwritemode(COPY_PUT);
 
-	/* 1. Active modal dialog buttons */
+	/* 1. Active modal dialog hit-testing (left-click only) */
 	if(fa!=0 && b==1)
 	{
-		/* Left button ("确定" / Y) on Save/Open/New/Exit dialogs */
+		/* Left OK(Y) button of Save/Open/New/Exit dialogs (246..306 x 214..232) */
 		if(x<=306 && x>=246 && y>=214 && y<=232)
 		{
 			if(fa==2) /* Save before Exit */
@@ -162,7 +191,7 @@ void MouseKey(struct EDITTYPE *pEdit)
 				delay(100);
 				return;
 			}
-			else if(fa==11) /* Save current file before opening new one */
+			else if(fa==11) /* Save active file before opening target file */
 			{
 				button3d(246, 214, 306, 232);
 				Save(pEdit->file.fname, pEdit);
@@ -171,7 +200,7 @@ void MouseKey(struct EDITTYPE *pEdit)
 				delay(100);
 				return;
 			}
-			else if(fa==12) /* Save current file before New */
+			else if(fa==12) /* Save active file before New */
 			{
 				button3d(246, 214, 306, 232);
 				Save(pEdit->file.fname, pEdit);
@@ -180,7 +209,7 @@ void MouseKey(struct EDITTYPE *pEdit)
 				delay(100);
 				return;
 			}
-			else if(fa==15) /* Confirm Save As filename */
+			else if(fa==15) /* Confirm Save As */
 			{
 				button3d(246, 214, 306, 232);
 				Saveas(pEdit);
@@ -189,7 +218,7 @@ void MouseKey(struct EDITTYPE *pEdit)
 				return;
 			}
 		}
-		/* Right button ("取消" / N) on Save/Open/New/Exit dialogs */
+		/* Right Cancel(N) button of Save/Open/New/Exit dialogs (314..374 x 214..232) */
 		else if(x<=374 && x>=314 && y>=214 && y<=232)
 		{
 			if(fa==2) /* Exit without saving */
@@ -227,10 +256,10 @@ void MouseKey(struct EDITTYPE *pEdit)
 			}
 		}
 
-		/* Left button ("查找" / "替换") on Find / Replace dialogs */
+		/* Left action button of Find/Replace dialog (258..314 x 214..232) */
 		if(x<=314 && x>=258 && y>=214 && y<=232)
 		{
-			if(fa==7) /* Execute replacement */
+			if(fa==7) /* Replace highlighted match */
 			{
 				button3d(258, 214, 314, 232);
 				pEdit->state.function=22;
@@ -249,7 +278,7 @@ void MouseKey(struct EDITTYPE *pEdit)
 				return;
 			}
 		}
-		/* Right button ("取消") on Find / Replace dialogs */
+		/* Right Cancel button of Find/Replace dialog (323..379 x 214..232) */
 		else if(x<=379 && x>=323 && y>=214 && y<=232)
 		{
 			if(fa==5)
@@ -268,7 +297,7 @@ void MouseKey(struct EDITTYPE *pEdit)
 			}
 		}
 
-		/* Info/alert popup dismissal (invalid filename, not found, Help) */
+		/* Any click dismisses an info/alert/Help popup (state 1) */
 		if(fa==1)
 		{
 			pEdit->state.functionActive=0;
@@ -279,7 +308,7 @@ void MouseKey(struct EDITTYPE *pEdit)
 		}
 	}
 
-	/* 2. Click inside text editing area (excluding scrollbar) to move caret */
+	/* 2. Click inside text viewport (excluding 20px scrollbar) to move caret */
 	if(fa==0 && pEdit->editActive==0 && b==1
 		&& x>=EDITERSCREENX1 && x<=EDITERSCREENX2-20
 		&& y>=EDITERSCREENY1 && y<=EDITERSCREENY2)
@@ -289,7 +318,7 @@ void MouseKey(struct EDITTYPE *pEdit)
 		struct MOUSESTATE tempState=pEdit->state;
 		if( ConvertNodePosi(pEdit, x, y)==1 )
 		{
-			/* Long press enters drag-selection; quick click moves caret */
+			/* Distinguish quick click (reposition caret) vs hold (select text) */
 			MouseBWChosen(pEdit);
 			pEdit->state.x=xTemp;
 			pEdit->state.y=yTemp;
@@ -297,18 +326,18 @@ void MouseKey(struct EDITTYPE *pEdit)
 			{
 				pEdit->state=tempState;
 				pEdit->state.function=2;
-				pEdit->state.key=0; /* Refresh caret without directional step */
+				pEdit->state.key=0; /* Trigger caret repaint without arrow step */
 			}
 		}
 	}
-	/* 3. Top-right Exit button */
+	/* 3. Top-right Exit button (595..635 x 3..22) */
 	else if(b==1 && x<=635 && x>=595 && y>=3 && y<=22)
 	{
 		button3d(595, 3, 635, 22);
 		pEdit->state.function=1;
 		delay(100);
 	}
-	/* 4. Bottom-left EN/ZH language toggle button */
+	/* 4. Bottom-left EN/ZH language toggle button (5..28 x 455..475) */
 	else if(b==1 && x<=28 && x>=5 && y>=455 && y<=475)
 	{
 		button3d(5, 455, 28, 475);
@@ -317,7 +346,7 @@ void MouseKey(struct EDITTYPE *pEdit)
 		delay(100);
 	}
 
-	/* 5. Scrollbar up/down arrow clicks */
+	/* 5. Scrollbar arrow buttons: top (Y=52..64) and bottom (Y=436..448) */
 	if(fa==0 && pEdit->editActive==0 && b==1
 		&& x<=632 && x>=616 && y>=52 && y<=64)
 	{
@@ -331,14 +360,18 @@ void MouseKey(struct EDITTYPE *pEdit)
 		pEdit->state.key=DOWN;
 	}
 
-	/* 6. Top menu bar and open pull-down submenu interaction */
+	/* 6. Top menu bar and active dropdown menu hit-testing */
 	ChooseSubmenu(pEdit);
 }
 
-/*
- * ChooseSubmenu - Handle clicks on the F1..F4 top menu bar buttons and
- *                 delegate hover/click events when a pull-down menu is open.
- */
+/*****************************************************************************
+ * Function: ChooseSubmenu
+ * Purpose:  Handle clicks on top-bar menu buttons (F1..F4) when no menu or
+ *           dialog is open, and forward hover/clicks to Submenu1Op..4Op when
+ *           a dropdown is open.
+ *
+ * @param pEdit Master editor context.
+ *****************************************************************************/
 void ChooseSubmenu(struct EDITTYPE *pEdit)
 {
 	int x=pEdit->state.x;
@@ -354,8 +387,8 @@ void ChooseSubmenu(struct EDITTYPE *pEdit)
 	}
 	if(pEdit->editActive==0 && pEdit->state.functionActive==0 && b==1)
 	{
-		/* Clear state.key=0 so GetSubmenu() won't override editActive with a stale F1..F4 key */
-		if(x>=5 && x<=70 && y>=25 && y<50)
+		/* Always clear state.key=0 so GetSubmenu() preserves our editActive */
+		if(x>=5 && x<=70 && y>=25 && y<50) /* File (<F1>) */
 		{
 			button3d(4, 27, 70, 48);
 			pEdit->state.key=0;
@@ -365,7 +398,7 @@ void ChooseSubmenu(struct EDITTYPE *pEdit)
 			pEdit->state.mouseFlag=1;
 			delay(100);
 		}
-		else if(x>=95 && x<=160 && y>=25 && y<=50)
+		else if(x>=95 && x<=160 && y>=25 && y<=50) /* Edit (<F2>) */
 		{
 			button3d(94, 27, 160, 48);
 			pEdit->state.key=0;
@@ -375,7 +408,7 @@ void ChooseSubmenu(struct EDITTYPE *pEdit)
 			pEdit->state.mouseFlag=1;
 			delay(100);
 		}
-		else if(x>=185 && x<=250 && y>=25 && y<=50)
+		else if(x>=185 && x<=250 && y>=25 && y<=50) /* Tools (<F3>) */
 		{
 			button3d(184, 27, 250, 48);
 			pEdit->state.key=0;
@@ -385,7 +418,7 @@ void ChooseSubmenu(struct EDITTYPE *pEdit)
 			pEdit->state.mouseFlag=1;
 			delay(100);
 		}
-		else if(x>=275 && x<=340 && y>=25 && y<=50)
+		else if(x>=275 && x<=340 && y>=25 && y<=50) /* Help (<F4>) */
 		{
 			button3d(274, 27, 340, 48);
 			pEdit->state.key=0;
@@ -398,14 +431,14 @@ void ChooseSubmenu(struct EDITTYPE *pEdit)
 	}
 }
 
-/* Submenu1Op - Mouse hover highlight and click dispatch for File (F1) menu */
+/* Submenu1Op - Hover tracking & click dispatch for File (F1) dropdown */
 void Submenu1Op(struct EDITTYPE *pEdit)
 {
 	int x=pEdit->state.x;
 	int y=pEdit->state.y;
 	int b=pEdit->state.button;
 
-	if(x>=5 && x<=85 && y>50 && y<=80) /* Open */
+	if(x>=5 && x<=85 && y>50 && y<=80) /* Item 1: Open */
 	{
 		if(pEdit->submenu.flag!=1)
 		{
@@ -420,7 +453,7 @@ void Submenu1Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(x>=5 && x<=85 && y>80 && y<=110) /* New */
+	else if(x>=5 && x<=85 && y>80 && y<=110) /* Item 2: New */
 	{
 		if(pEdit->submenu.flag!=2)
 		{
@@ -435,7 +468,7 @@ void Submenu1Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(x>=5 && x<=85 && y>110 && y<=140) /* Save */
+	else if(x>=5 && x<=85 && y>110 && y<=140) /* Item 3: Save */
 	{
 		if(pEdit->submenu.flag!=3)
 		{
@@ -450,7 +483,7 @@ void Submenu1Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(x>=5 && x<=85 && y>140 && y<=170) /* Save As */
+	else if(x>=5 && x<=85 && y>140 && y<=170) /* Item 4: Save As */
 	{
 		if(pEdit->submenu.flag!=4)
 		{
@@ -465,7 +498,7 @@ void Submenu1Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(x>=5 && x<=85 && y>170 && y<=200) /* Exit */
+	else if(x>=5 && x<=85 && y>170 && y<=200) /* Item 5: Close/Exit */
 	{
 		if(pEdit->submenu.flag!=5)
 		{
@@ -480,21 +513,21 @@ void Submenu1Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(b==1) /* Click outside dropdown closes it */
+	else if(b==1) /* Clicking outside dropdown dismisses it */
 	{
 		ExitSubmenu(pEdit);
 		delay(100);
 	}
 }
 
-/* Submenu2Op - Mouse hover highlight and click dispatch for Edit (F2) menu */
+/* Submenu2Op - Hover tracking & click dispatch for Edit (F2) dropdown */
 void Submenu2Op(struct EDITTYPE *pEdit)
 {
 	int x=pEdit->state.x;
 	int y=pEdit->state.y;
 	int b=pEdit->state.button;
 
-	if(x>=95 && x<=175 && y>50 && y<=80) /* Cut */
+	if(x>=95 && x<=175 && y>50 && y<=80) /* Item 1: Cut */
 	{
 		if(pEdit->submenu.flag!=1)
 		{
@@ -509,7 +542,7 @@ void Submenu2Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(x>=95 && x<=175 && y>80 && y<=110) /* Copy */
+	else if(x>=95 && x<=175 && y>80 && y<=110) /* Item 2: Copy */
 	{
 		if(pEdit->submenu.flag!=2)
 		{
@@ -524,7 +557,7 @@ void Submenu2Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(x>=95 && x<=175 && y>110 && y<=140) /* Paste */
+	else if(x>=95 && x<=175 && y>110 && y<=140) /* Item 3: Paste */
 	{
 		if(pEdit->submenu.flag!=3)
 		{
@@ -539,7 +572,7 @@ void Submenu2Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(x>=95 && x<=175 && y>140 && y<=170) /* Select All */
+	else if(x>=95 && x<=175 && y>140 && y<=170) /* Item 4: Select All */
 	{
 		if(pEdit->submenu.flag!=4)
 		{
@@ -561,14 +594,14 @@ void Submenu2Op(struct EDITTYPE *pEdit)
 	}
 }
 
-/* Submenu3Op - Mouse hover highlight and click dispatch for Tools (F3) menu */
+/* Submenu3Op - Hover tracking & click dispatch for Tools (F3) dropdown */
 void Submenu3Op(struct EDITTYPE *pEdit)
 {
 	int x=pEdit->state.x;
 	int y=pEdit->state.y;
 	int b=pEdit->state.button;
 
-	if(x>=185 && x<=265 && y>50 && y<=80) /* Find */
+	if(x>=185 && x<=265 && y>50 && y<=80) /* Item 1: Find */
 	{
 		if(pEdit->submenu.flag!=1)
 		{
@@ -583,7 +616,7 @@ void Submenu3Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(x>=185 && x<=265 && y>80 && y<=110) /* Find & Replace */
+	else if(x>=185 && x<=265 && y>80 && y<=110) /* Item 2: Find & Replace */
 	{
 		if(pEdit->submenu.flag!=2)
 		{
@@ -605,14 +638,14 @@ void Submenu3Op(struct EDITTYPE *pEdit)
 	}
 }
 
-/* Submenu4Op - Mouse hover highlight and click dispatch for Help (F4) menu */
+/* Submenu4Op - Hover tracking & click dispatch for Help (F4) dropdown */
 void Submenu4Op(struct EDITTYPE *pEdit)
 {
 	int x=pEdit->state.x;
 	int y=pEdit->state.y;
 	int b=pEdit->state.button;
 
-	if(x>=275 && x<=355 && y>50 && y<=80) /* Operation Guide */
+	if(x>=275 && x<=355 && y>50 && y<=80) /* Item 1: Operation Guide */
 	{
 		if(pEdit->submenu.flag!=1)
 		{
@@ -627,7 +660,7 @@ void Submenu4Op(struct EDITTYPE *pEdit)
 			delay(100);
 		}
 	}
-	else if(x>=275 && x<=355 && y>80 && y<=110) /* About / Credits */
+	else if(x>=275 && x<=355 && y>80 && y<=110) /* Item 2: About/Credits */
 	{
 		if(pEdit->submenu.flag!=2)
 		{
@@ -649,7 +682,11 @@ void Submenu4Op(struct EDITTYPE *pEdit)
 	}
 }
 
-/* WhiteBlack - Draw top and left border lines to create a 3D bevel highlight */
+/*****************************************************************************
+ * Function: WhiteBlack
+ * Purpose:  Draw the top and left edges of box (x0,y0)-(x1,y1) in `color`
+ *           to produce a raised (WHITE) or sunken (BLACK) 3D bevel effect.
+ *****************************************************************************/
 void WhiteBlack(int x0, int y0, int x1, int y1, int color)
 {
 	setcolor(color);
@@ -658,7 +695,11 @@ void WhiteBlack(int x0, int y0, int x1, int y1, int color)
 	line(x0, y0, x0, y1);
 }
 
-/* button3d - Briefly invert and restore a button's 3D bevel on click */
+/*****************************************************************************
+ * Function: button3d
+ * Purpose:  Animate a brief 10ms depressed->raised bevel flash when a button
+ *           or dialog frame is clicked/opened.
+ *****************************************************************************/
 void button3d(int x0, int y0, int x1, int y1)
 {
 	setcolor(WHITE);

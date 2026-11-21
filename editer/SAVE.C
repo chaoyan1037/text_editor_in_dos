@@ -1,6 +1,6 @@
 /*****************************************************************************
  * File: SAVE.C
- * Function: Save confirmation dialog and document serialization (Save/SaveAs).
+ * Purpose: Save confirmation modal dialog and text serialization (Save/SaveAs).
  * Programmer: XiaoYao (2011.10.10)
  *****************************************************************************/
 
@@ -15,23 +15,27 @@
 #include"h/hanzi.h"
 #include"h/save.h"
 
-/*
- * Savewarning - Draw the generic "Save? OK (Y) / Cancel (N)" confirmation box.
- * Caller sets `pEdit->state.functionActive` (2, 9, 11, or 12) to determine
- * what happens after the user confirms or cancels.
- */
+/*****************************************************************************
+ * Function: Savewarning
+ * Purpose:  Render the centered "保存？ 确定(Y) / 取消(N)" dialog box
+ *           (240..380 x 160..240) shared by Exit, Save, Open, and New prompts.
+ *
+ * @param pEdit Editor context (used for Hanzi label rendering).
+ * @note        Caller is responsible for setting `state.functionActive`
+ *              (2, 9, 11, or 12) so keyboard/mouse Y/N clicks route properly.
+ *****************************************************************************/
 void Savewarning(struct EDITTYPE *pEdit)
 {
 	setfillstyle(SOLID_FILL, LIGHTGRAY);
 	bar(240, 160, 380, 240);
 	button3d(240, 160, 380, 240);
 
-	/* OK (Y) button frame */
+	/* Left OK (Y) button: X=246..306, Y=214..232 */
 	setcolor(BLACK);
 	rectangle(240+6, 160+54, 380-74, 240-8);
 	WhiteBlack(240+6, 160+54, 380-74, 240-8, WHITE);
 
-	/* Cancel (N) button frame */
+	/* Right Cancel (N) button: X=314..374, Y=214..232 */
 	setcolor(BLACK);
 	rectangle(245+69, 160+54, 380-6, 240-8);
 	WhiteBlack(245+69, 160+54, 380-6, 240-8, WHITE);
@@ -44,28 +48,33 @@ void Savewarning(struct EDITTYPE *pEdit)
 	outtextxy(351, 230, "(N)");
 }
 
-/*
- * Save - Serialize the document linked list to `filename` inside SAVE/.
+/*****************************************************************************
+ * Function: Save
+ * Purpose:  Serialize all document nodes from `pEdit->start` to `filename`
+ *           under the SAVE/ directory in text mode ("wt").
  *
- * Tries "C://TC30//BIN//SAVE//" first, falling back to relative "SAVE/".
- * Uses fputc() directly without mutating node contents, and writes '\n' for
- * newline nodes (flag=0), 1 byte for ASCII (flag=1), and 2 bytes for Hanzi
- * (flag=2).
- */
+ * @param filename Target DOS 8.3 filename (e.g., "NONAME.TXT").
+ * @param pEdit    Master editor context.
+ * @post           Always sets `editFlag = 1` and `cursorFlag = 1` to clear
+ *                 the dialog overlay, even if fopen() fails. Never mutates
+ *                 node contents while serializing.
+ * @complexity     O(N) where N = total nodes in document.
+ *****************************************************************************/
 void Save(char *filename, struct EDITTYPE *pEdit)
 {
 	FILE *fp=NULL;
 	struct NODE *p;
 	char routine[64];
 
-	pEdit->editFlag=1;   /* Redraw viewport to erase modal dialog */
-	pEdit->cursorFlag=1; /* Re-sync caret after redraw */
+	pEdit->editFlag=1;   /* Erase confirmation dialog on next ViewAll() */
+	pEdit->cursorFlag=1; /* Re-sync caret position */
 
 	if(filename==NULL || filename[0]=='\0')
 	{
 		return;
 	}
 
+	/* Try original TC 3.0 SAVE directory first, then relative "SAVE/" */
 	sprintf(routine, "C://TC30//BIN//SAVE//%.15s", filename);
 	fp=fopen(routine, "wt");
 	if(fp==NULL)
@@ -83,6 +92,7 @@ void Save(char *filename, struct EDITTYPE *pEdit)
 	{
 		if(p->flag==0)
 		{
+			/* Text-mode '\n' expands to CRLF automatically on DOS */
 			fputc('\n', fp);
 		}
 		else if(p->flag==1)
@@ -103,10 +113,13 @@ void Save(char *filename, struct EDITTYPE *pEdit)
 	fclose(fp);
 }
 
-/*
- * Saveas - Save the document under the newly typed `pEdit->spell.name` and
- *          update the active title-bar filename (`pEdit->file.fname`).
- */
+/*****************************************************************************
+ * Function: Saveas
+ * Purpose:  Save the document to the filename typed in `pEdit->spell.name`
+ *           and update the active title-bar filename (`pEdit->file.fname`).
+ *
+ * @param pEdit Master editor context with `spell.name` populated by InName().
+ *****************************************************************************/
 void Saveas(struct EDITTYPE *pEdit)
 {
 	if(pEdit->spell.name[0]=='\0')
@@ -117,5 +130,5 @@ void Saveas(struct EDITTYPE *pEdit)
 	Save(pEdit->spell.name, pEdit);
 	strncpy(pEdit->file.fname, pEdit->spell.name, sizeof(pEdit->file.fname)-1);
 	pEdit->file.fname[sizeof(pEdit->file.fname)-1]='\0';
-	pEdit->file.fileflag=1;
+	pEdit->file.fileflag=1; /* Repaint title bar with new filename */
 }

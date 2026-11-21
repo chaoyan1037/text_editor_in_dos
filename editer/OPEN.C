@@ -1,7 +1,7 @@
 /*****************************************************************************
  * File: OPEN.C
- * Function: Load an existing text file (ASCII + GB2312 Chinese) into the
- *           editor linked list, or reset the editor to a blank document.
+ * Purpose: Load text files (ASCII + GB2312 Chinese) into the document list
+ *          and reset the editor to a fresh blank document ("NONAME.TXT").
  * Programmer: XiaoYao (2011.10.10-2011.10.11)
  *****************************************************************************/
 #include<stdlib.h>
@@ -19,20 +19,25 @@
 #include"h/hanzi.h"
 #include"h/open.h"
 
-/*
- * Open - Load the file named in `pEdit->spell.name` from the SAVE directory.
+/*****************************************************************************
+ * Function: Open
+ * Purpose:  Open and parse the file named in `pEdit->spell.name` from the
+ *           SAVE directory, replacing the current document buffer on success.
  *
- * Tries the original TC 3.0 path ("C://TC30//BIN//SAVE//") first, then falls
- * back to relative "SAVE/". On open failure, displays an error dialog and
- * sets `functionActive = 1` so any keypress or click dismisses it cleanly.
+ * @param pEdit Editor context providing `spell.name`.
+ * @post        - On open failure: draws "无效文件名！" alert box and sets
+ *                `state.functionActive = 1` so any key or click dismisses it.
+ *              - On success: frees prior nodes, populates the document list,
+ *                copies the filename into `file.fname`, and flags title-bar,
+ *                viewport, caret, and scrollbar refreshes.
  *
- * Byte decoding rules:
- *   - 0x20..0x7E: printable ASCII node (flag=1)
- *   - '\n':       newline node (flag=0)
- *   - '\r':       ignored (normalizes CRLF line endings)
- *   - '\t':       expanded to 4 spaces (prevents corrupting subsequent Hanzi)
- *   - >= 0x80:    paired with the next byte as a 2-byte GB2312 Hanzi (flag=2)
- */
+ * Byte Stream Decoding:
+ *   - 0x20..0x7E : printable ASCII -> GetEnglish() (flag=1)
+ *   - '\n'       : line break      -> GetEnter()   (flag=0)
+ *   - '\r'       : skipped         (handles DOS CRLF files cleanly)
+ *   - '\t'       : expanded to 4 spaces (prevents mis-syncing GB2312 pairs)
+ *   - >= 0x80    : paired with next byte -> Gethanzi() (flag=2)
+ *****************************************************************************/
 void Open(struct EDITTYPE *pEdit)
 {
 	FILE *fp=NULL;
@@ -41,6 +46,7 @@ void Open(struct EDITTYPE *pEdit)
 
 	if(pEdit->spell.name[0]!='\0')
 	{
+		/* Try original TC 3.0 path first, then relative repository path */
 		sprintf(routine, "C://TC30//BIN//SAVE//%.15s", pEdit->spell.name);
 		fp=fopen(routine, "rt");
 		if(fp==NULL)
@@ -52,7 +58,7 @@ void Open(struct EDITTYPE *pEdit)
 
 	if(fp==NULL)
 	{
-		/* Show "invalid filename" modal alert */
+		/* Display dismissible "invalid filename" modal alert */
 		setfillstyle(SOLID_FILL, LIGHTGRAY);
 		bar(240, 160, 380, 240);
 		button3d(240, 160, 380, 240);
@@ -67,6 +73,7 @@ void Open(struct EDITTYPE *pEdit)
 	else
 	{
 		FreeAllNode(pEdit);
+		/* Use int r with EOF check (avoids classic feof() extra-iteration bug) */
 		while( (r=fgetc(fp))!=EOF )
 		{
 			if( (r>=0x20)&&(r<=0x7e) )
@@ -94,6 +101,7 @@ void Open(struct EDITTYPE *pEdit)
 			}
 			else if(r>=0x80)
 			{
+				/* Read second byte of GB2312/GBK character pair */
 				r2=fgetc(fp);
 				if(r2!=EOF)
 				{
@@ -103,32 +111,40 @@ void Open(struct EDITTYPE *pEdit)
 				}
 			}
 		}
-		/* Copy filename into dedicated file.fname buffer (no aliasing) */
+
+		/* Store filename in dedicated file.fname buffer (never alias spell.name) */
 		strncpy(pEdit->file.fname, pEdit->spell.name, sizeof(pEdit->file.fname)-1);
 		pEdit->file.fname[sizeof(pEdit->file.fname)-1]='\0';
-		pEdit->file.fileflag=1; /* Refresh title bar */
+		pEdit->file.fileflag=1;
 		pEdit->editFlag=1;
 		pEdit->cursorFlag=1;
-		pEdit->tempCurrentCount=0;
+		pEdit->tempCurrentCount=0; /* Force RollBar() recalculation */
 
 		fclose(fp);
 	}
 }
 
-/*
- * New - Clear the current document and reset editor state to "NONAME.TXT".
- * Note: Any save-before-new confirmation is handled beforehand by SwitchFunction.
- */
+/*****************************************************************************
+ * Function: New
+ * Purpose:  Discard the current document buffer and initialize a blank
+ *           document titled "NONAME.TXT".
+ *
+ * @param pEdit Master editor context.
+ * @pre         Caller (SwitchFunction case 14 / modal state 12) has already
+ *              handled any save-before-new user confirmation.
+ * @post        Document list is empty, viewport is cleared, title bar shows
+ *              "NONAME.TXT", and scrollbar/status-bar caches are invalidated.
+ *****************************************************************************/
 void New(struct EDITTYPE *pEdit)
 {
 	FreeAllNode(pEdit);
 	setfillstyle(SOLID_FILL, WHITE);
 	bar(EDITERSCREENX1, EDITERSCREENY1, EDITERSCREENX2, EDITERSCREENY2);
 	strcpy(pEdit->file.fname, "NONAME.TXT");
-	pEdit->file.fileflag=1; /* Refresh title bar */
-	pEdit->editFlag=1;      /* Redraw empty viewport */
+	pEdit->file.fileflag=1;
+	pEdit->editFlag=1;
 	pEdit->cursorFlag=1;
 	pEdit->pageDownFlag=0;
 	pEdit->tempCurrentCount=0;
-	pEdit->lastPosX=-1;     /* Force status bar refresh */
+	pEdit->lastPosX=-1;
 }

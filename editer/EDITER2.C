@@ -1,20 +1,36 @@
 /*****************************************************************************
  * File: EDITER2.C
- * Function: Program entry point, master event loop, state initialization,
- *           and command / keyboard / modal-dialog dispatch tables.
+ * Purpose: Application entry point, master event loop, context initialization,
+ *          and command / keyboard / modal-dialog state-machine dispatchers.
  * Programmer: YanChao (2011.9.10-2011.11.4)
  *
- * Event Loop Pipeline (one iteration):
- *   1. Resolve deferred flags (`pageDownFlag`, `file.modifyFlag`).
- *   2. Dispatch queued command `state.function` via SwitchFunction().
- *   3. If no pull-down menu is active (`editActive == 0`), poll BIOS keyboard:
- *        - In normal mode (`functionActive == 0`), map control/nav keys via
- *          SwitchKey().
- *        - Dispatch printable characters, Chinese IME, or modal Y/N/F/R/C
- *          responses via FunctionActiveSwitch().
- *      Otherwise delegate keys to Submenu().
- *   4. Refresh UI in strict draw order:
+ * Main Event-Loop Execution Order (per iteration):
+ *   1. Resolve deferred flags:
+ *        - `pageDownFlag` (1/2) -> inject synthetic DOWN key after scroll.
+ *        - `file.modifyFlag` (1/2) -> promote to modal state 11 (Open) / 12 (New).
+ *   2. Execute queued command `state.function` (1..25) via SwitchFunction().
+ *   3. Process keyboard input:
+ *        - If `editActive == 0`: poll bioskey(1)/bioskey(0).
+ *            * If `functionActive == 0`: dispatch shortcuts via SwitchKey().
+ *            * Always run FunctionActiveSwitch() for text/IME/modal keys.
+ *        - Else (`editActive` in 1..4): delegate to Submenu().
+ *   4. Refresh UI layers in strict order so XOR cursor & mouse never leave
+ *      artifacts:
  *        ShowPosition -> MouseKey -> ViewAll -> ShowMouse -> DrawCursor -> RollBar.
+ *
+ * Modal Dialog State Machine (`state.functionActive`):
+ *   0  (Normal editing)
+ *    |-- ESC / Exit btn ------> 2  (Save before Exit: Y/N -> ExitEditer)
+ *    |-- Ctrl+S / Save -------> 9  (Save confirm: Y -> Save, N -> 0)
+ *    |-- Ctrl+O / Open -------> 10 (Open confirm: Y -> Open or 11, N -> 0)
+ *    |                            `-> 11 (Save before Open: Y/N -> Open)
+ *    |-- Ctrl+N / New --------> 12 (Save before New: Y/N -> New)
+ *    |-- Ctrl+D / Save As ----> 15 (Save As confirm: Y -> Saveas, N -> 0)
+ *    |-- Ctrl+F / Find -------> 5  (Find ready: F -> Find, C -> 0)
+ *    |-- Ctrl+R / Replace ----> 6  (Replace ready: F -> 7 or 1, C -> 0)
+ *    |                            `-> 7 (Match found: R -> Replace, C -> 0)
+ *    |-- Ctrl+A / Select All -> 13 (Ctrl+C / Ctrl+X / BackSpace / cancel -> 0)
+ *    `-- Alert / Help popup --> 1  (Any key or click -> redraw & 0)
  *****************************************************************************/
 #include<graphics.h>
 #include<stdlib.h>
@@ -43,18 +59,21 @@ void SwitchFunction(struct EDITTYPE *pEdit);
 void SwitchKey(struct EDITTYPE *pEdit);
 void FunctionActiveSwitch(struct EDITTYPE *pEdit);
 
-/*
- * main - Initialize editor state and VGA graphics, then run the interactive
- *        event loop until ExitEditer() terminates the process.
- */
+/*****************************************************************************
+ * Function: main
+ * Purpose:  Initialize `struct EDITTYPE`, start VGA graphics, and run the
+ *           event loop until ExitEditer() terminates the program.
+ *
+ * @return   0 (standard C89 signature; normal exit occurs via exit(0)).
+ *****************************************************************************/
 int main(void)
 {
-	int inputFlag=0; /* Set to 1 during a loop pass when a BIOS key was read */
+	int inputFlag=0; /* 1 when a BIOS keystroke was dequeued in this pass */
 	struct EDITTYPE edit;
 	InitStruct(&edit);
 	DrawMainMenu(&edit);
 
-	/* Display initial "NONAME.TXT" filename in the title bar */
+	/* Render default title-bar filename ("NONAME.TXT") */
 	setcolor(YELLOW);
 	outtextxy(5, 15, edit.file.fname);
 
@@ -63,7 +82,7 @@ int main(void)
 		setcolor(BLACK);
 		settextjustify(LEFT_TEXT, BOTTOM_TEXT);
 
-		/* After scrolling down at the bottom row, step the caret onto the new row */
+		/* After scrolling down at row 25, step caret onto the newly exposed row */
 		if(edit.pageDownFlag==1 || edit.pageDownFlag==2)
 		{
 			edit.state.function=2;
@@ -71,7 +90,7 @@ int main(void)
 			edit.state.key=DOWN;
 		}
 
-		/* Promote deferred save-before-open (1) / save-before-new (2) dialogs */
+		/* Promote deferred save-before-open (1) or save-before-new (2) prompts */
 		if(edit.file.modifyFlag==1)
 		{
 			edit.state.functionActive=11;
@@ -83,7 +102,7 @@ int main(void)
 			edit.file.modifyFlag=0;
 		}
 
-		/* Execute any command queued by keyboard or mouse in the previous pass */
+		/* Dispatch any command queued by keyboard, mouse, or menu selection */
 		if(edit.state.function!=0)
 		{
 			SwitchFunction(&edit);
@@ -97,8 +116,8 @@ int main(void)
 			{
 				long int i;
 				i=bioskey(0);
-				edit.state.key=i;                 /* Full scan code + ASCII */
-				edit.state.ascii=(int)(i&0x00ff); /* Low-byte ASCII value */
+				edit.state.key=i;
+				edit.state.ascii=(int)(i&0x00ff);
 				inputFlag=1;
 				if(edit.state.functionActive==0)
 				{
@@ -115,7 +134,7 @@ int main(void)
 			Submenu(&edit);
 		}
 
-		/* UI update order is intentional to keep XOR cursor/mouse clean */
+		/* Strict render/poll sequence preserves XOR mouse & caret coherence */
 		ShowPosition(&edit);
 		MouseKey(&edit);
 		ViewAll(&edit);
@@ -127,22 +146,28 @@ int main(void)
 	return 0;
 }
 
-/*
- * InitStruct - Zero-initialize `pEdit`, configure default coordinates, menu
- *              counts, and filename, and then probe the DOS mouse driver.
- */
+/*****************************************************************************
+ * Function: InitStruct
+ * Purpose:  Zero-initialize all fields of `EDITTYPE`, set startup defaults
+ *           ("NONAME.TXT", English mode, submenu counts, invalid caches), and
+ *           probe the DOS mouse driver via InitMouse().
+ *
+ * @param pEdit Uninitialized master context allocated in main().
+ * @post        If InitMouse() fails, prints an error and calls exit(1) safely
+ *              without freeing uninitialized pointers.
+ *****************************************************************************/
 void InitStruct(struct EDITTYPE *pEdit)
 {
 	memset(pEdit, 0, sizeof(struct EDITTYPE));
 
-	/* Initial mouse position centered on the 640x480 screen */
+	/* Center initial mouse coordinates on the 640x480 screen */
 	pEdit->state.x=320;
 	pEdit->state.y=240;
 	pEdit->state.function=0;
 	pEdit->state.functionActive=0;
 	pEdit->state.mouseFlag=0;
 
-	/* Empty document, clipboard, and find-match lists */
+	/* Empty document, clipboard, and find-match linked lists */
 	pEdit->start=NULL;
 	pEdit->current=NULL;
 	pEdit->last=NULL;
@@ -152,7 +177,7 @@ void InitStruct(struct EDITTYPE *pEdit)
 	pEdit->findLast=NULL;
 	pEdit->pageFirst=NULL;
 
-	/* Caret starts at top-left of viewport; caches force initial draw */
+	/* Caret at viewport top-left; cache sentinels force initial UI paint */
 	pEdit->x=EDITERSCREENX1;
 	pEdit->y=EDITERSCREENY1+CHARHIGH;
 	pEdit->line=0;
@@ -165,7 +190,7 @@ void InitStruct(struct EDITTYPE *pEdit)
 	pEdit->copyCutFlag=0;
 	pEdit->clipFlag=0;
 	pEdit->spell.phz=NULL;
-	pEdit->language=0; /* Start in English (ASCII) input mode */
+	pEdit->language=0;
 	pEdit->pageDownFlag=0;
 	pEdit->tempLineCount=CHARINROW;
 	pEdit->tempCurrentCount=0;
@@ -176,7 +201,7 @@ void InitStruct(struct EDITTYPE *pEdit)
 	strcpy(pEdit->file.fname, "NONAME.TXT");
 	pEdit->file.fileflag=0;
 
-	/* Submenu item counts: File(5), Edit(4), Tools(2), Help(2) */
+	/* Item counts for menus F1..F4 */
 	pEdit->submenu.menuflag=0;
 	pEdit->submenu.flag=1;
 	pEdit->submenu.SubmenuNum[0]=5;
@@ -188,7 +213,7 @@ void InitStruct(struct EDITTYPE *pEdit)
 	pEdit->findGoal[0]='\0';
 	pEdit->replaceGoal[0]='\0';
 
-	/* Verify DOS mouse driver is present after all fields are safely initialized */
+	/* Initialize DOS mouse driver only after struct pointers are valid */
 	if(!InitMouse())
 	{
 		printf("InitMouse failed...\n");
@@ -197,18 +222,27 @@ void InitStruct(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * SwitchFunction - Central command dispatcher keyed by `pEdit->state.function`.
- *   1: Exit prompt      9: Save prompt      17: Execute Save
- *   2: MoveCursor      10: Open filename    18: Open (prompt save if non-empty)
- *   3: GetEnter        11: Execute New      19: Execute Open
- *   4: Paste           12: CopySelection    20: Cancel Find
- *   5: Find dialog     13: CopyCut          21: Find & Replace dialog
- *   6: Open submenu    14: New (prompt)     22: Execute Replace
- *   7: GetEnglish      15: Save As dialog   23: Cancel Replace
- *   8: Toggle EN/ZH    16: Execute Find     24: Extend selection
- *                                           25: Select All on page
- */
+/*****************************************************************************
+ * Function: SwitchFunction
+ * Purpose:  Central command table executing `pEdit->state.function` (1..25).
+ *
+ * Command ID Reference:
+ *   1  = Prompt Save before Exit   14 = New (prompt Save if non-empty)
+ *   2  = MoveCursor                15 = Save As filename prompt
+ *   3  = GetEnter                  16 = Execute Find() (FingGoal)
+ *   4  = Paste clipboard           17 = Save to active file.fname
+ *   5  = Find dialog               18 = Open (prompt Save if non-empty)
+ *   6  = Open pull-down menu       19 = Execute Open()
+ *   7  = GetEnglish (ASCII)        20 = Cancel Find
+ *   8  = Toggle EN/ZH + redraw     21 = Find & Replace dialog
+ *   9  = Save confirmation prompt  22 = Execute ReplaceFunction()
+ *   10 = Open filename prompt      23 = Cancel Replace
+ *   11 = Execute New()             24 = Extend selection (BlackWhiteChoosen)
+ *   12 = CopySelection (Ctrl+C)    25 = Select All on page (AllChosen)
+ *   13 = CopyCut (Ctrl+X/BS)
+ *
+ * @param pEdit Master editor context.
+ *****************************************************************************/
 void SwitchFunction(struct EDITTYPE *pEdit)
 {
 	switch(pEdit->state.function)
@@ -251,7 +285,7 @@ void SwitchFunction(struct EDITTYPE *pEdit)
 			}
 			else
 			{
-				pEdit->editFlag=1;
+				pEdit->editFlag=1; /* ESC cancel in InName: restore screen */
 			}
 			break;
 		case 11:
@@ -283,7 +317,7 @@ void SwitchFunction(struct EDITTYPE *pEdit)
 			}
 			else
 			{
-				pEdit->editFlag=1;
+				pEdit->editFlag=1; /* ESC cancel in InName: restore screen */
 			}
 			break;
 		case 16:
@@ -329,10 +363,13 @@ void SwitchFunction(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * SwitchKey - Translate special/shortcut BIOS keys in normal editing mode
- *             (`functionActive == 0`) into queued command IDs.
- */
+/*****************************************************************************
+ * Function: SwitchKey
+ * Purpose:  Map BIOS control, navigation, and function keys in normal editing
+ *           mode (`functionActive == 0`) to queued `state.function` commands.
+ *
+ * @param pEdit Master editor context with `state.key` set by bioskey(0).
+ *****************************************************************************/
 void SwitchKey(struct EDITTYPE *pEdit)
 {
 	switch( pEdit->state.key )
@@ -370,16 +407,19 @@ void SwitchKey(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * FunctionActiveSwitch - Route printable text input (EN or ZH) when
- *                        `functionActive == 0`, or handle keyboard responses
- *                        (Y/N/F/R/C/Ctrl+C/Ctrl+X) for the active modal state.
- */
+/*****************************************************************************
+ * Function: FunctionActiveSwitch
+ * Purpose:  Handle printable character input (ASCII or Pinyin IME) during
+ *           normal editing (`functionActive == 0`), or process modal dialog
+ *           confirmation keys (`functionActive` in 1, 2, 5..7, 9..13, 15).
+ *
+ * @param pEdit Master editor context with freshly read `state.{key,ascii}`.
+ *****************************************************************************/
 void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 {
 	if(pEdit->language==0 && pEdit->state.functionActive==0)
 	{
-		/* English mode: insert any printable ASCII character */
+		/* English mode: route any printable ASCII byte (0x20..0x7E) to GetEnglish */
 		if( pEdit->state.ascii>=0x20 && pEdit->state.ascii<=0x7e )
 		{
 			pEdit->state.function=7;
@@ -387,7 +427,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 	}
 	else if(pEdit->language==1 && pEdit->state.functionActive==0)
 	{
-		/* Chinese mode: 'a'..'z' starts pinyin IME; symbols/digits insert as ASCII */
+		/* Chinese mode: 'a'..'z' starts pinyin IME; punctuation/digits insert directly */
 		if( pEdit->state.ascii>=0x20 && pEdit->state.ascii<=0x7e )
 		{
 			if(pEdit->state.ascii>='a' && pEdit->state.ascii<='z')
@@ -400,12 +440,12 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			}
 		}
 	}
-	else if(pEdit->state.functionActive==1) /* Dismiss info/help alert on any key */
+	else if(pEdit->state.functionActive==1) /* Dismiss alert / Help popup on any key */
 	{
 		pEdit->editFlag=1;
 		pEdit->state.functionActive=0;
 	}
-	else if(pEdit->state.functionActive==2) /* Save-before-Exit confirmation */
+	else if(pEdit->state.functionActive==2) /* Save-before-Exit (Y/N) */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -419,7 +459,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			ExitEditer(pEdit);
 		}
 	}
-	else if(pEdit->state.functionActive==5 || pEdit->state.functionActive==6) /* Find / Replace search */
+	else if(pEdit->state.functionActive==5 || pEdit->state.functionActive==6) /* Find / Replace (F/C) */
 	{
 		if(pEdit->state.ascii=='f' || pEdit->state.ascii=='F')
 		{
@@ -437,7 +477,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			}
 		}
 	}
-	else if(pEdit->state.functionActive==7) /* Confirm replacement on found match */
+	else if(pEdit->state.functionActive==7) /* Replace matched occurrence (R/C) */
 	{
 		if(pEdit->state.ascii=='r' || pEdit->state.ascii=='R')
 		{
@@ -448,7 +488,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->state.function=23;
 		}
 	}
-	else if(pEdit->state.functionActive==9) /* Save confirmation */
+	else if(pEdit->state.functionActive==9) /* Save confirmation (Y/N) */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -461,7 +501,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->editFlag=1;
 		}
 	}
-	else if(pEdit->state.functionActive==10) /* Open filename confirmation */
+	else if(pEdit->state.functionActive==10) /* Open filename confirmation (Y/N) */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -474,7 +514,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->editFlag=1;
 		}
 	}
-	else if(pEdit->state.functionActive==11) /* Save-before-Open confirmation */
+	else if(pEdit->state.functionActive==11) /* Save-before-Open (Y/N) */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -488,7 +528,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->state.functionActive=0;
 		}
 	}
-	else if(pEdit->state.functionActive==12) /* Save-before-New confirmation */
+	else if(pEdit->state.functionActive==12) /* Save-before-New (Y/N) */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -503,7 +543,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->state.mouseFlag=0;
 		}
 	}
-	else if(pEdit->state.functionActive==13) /* Select-All action dispatch */
+	else if(pEdit->state.functionActive==13) /* Select-All action (Ctrl+C/X/BS) */
 	{
 		switch( pEdit->state.key )
 		{
@@ -515,7 +555,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 				pEdit->state.function=13;
 				break;
 			default:
-				/* Any other key cancels the selection highlight cleanly */
+				/* Any other key cancels the page selection highlight cleanly */
 				if(pEdit->copyCutFlag==0)
 				{
 					pEdit->clipStart=NULL;
@@ -526,7 +566,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 		}
 		pEdit->state.functionActive=0;
 	}
-	else if(pEdit->state.functionActive==15) /* Save-As filename confirmation */
+	else if(pEdit->state.functionActive==15) /* Save-As filename confirmation (Y/N) */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{

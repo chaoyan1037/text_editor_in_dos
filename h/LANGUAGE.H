@@ -1,14 +1,19 @@
 /*****************************************************************************
  * File: LANGUAGE.H
- * Purpose: ASCII character insertion, newline insertion, and EN/ZH toggle.
+ * Purpose: Printable ASCII insertion, newline insertion, and EN/ZH toggle.
  *****************************************************************************/
 #ifndef _LANGUAGE_H_
 #define _LANGUAGE_H_
 
 struct EDITTYPE;
 
-void GetEnglish(struct EDITTYPE *pEdit);       /* Insert printable ASCII node */
-void GetEnter(struct EDITTYPE *pEdit);         /* Insert newline (flag=0) node */
-void ExchangeLanguage(struct EDITTYPE *pEdit); /* Toggle language between 0 and 1 */
+/* Insert pEdit->state.ascii as a flag=1 ASCII node at the caret */
+void GetEnglish(struct EDITTYPE *pEdit);
+
+/* Insert a flag=0 newline node at the caret (triggers scroll at row 25) */
+void GetEnter(struct EDITTYPE *pEdit);
+
+/* Toggle pEdit->language between 0 (English) and 1 (Chinese Pinyin) */
+void ExchangeLanguage(struct EDITTYPE *pEdit);
 
 #endif

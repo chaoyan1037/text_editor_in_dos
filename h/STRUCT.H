@@ -1,126 +1,175 @@
 /*****************************************************************************
  * File: STRUCT.H
- * Purpose: Core data structures shared across all editor modules.
+ * Purpose: Core data structures and state invariants shared by all modules.
  *
- * Architectural Overview:
- *   - Document storage is a doubly-linked list of `struct NODE` elements
- *     headed by `start` and terminated by `last`.
- *   - `pageFirst` marks the first node rendered on the current screen page.
- *   - `current` points to the node immediately BEFORE the caret. A value of
- *     `current == NULL` means the caret sits immediately before `pageFirst`
- *     (top-left of the current page).
- *   - Clipboard ownership is governed by `copyCutFlag`:
- *       * copyCutFlag == 0: `clipStart..clipLast` is a live selection range
- *         pointing to nodes inside `start..last` (do NOT free separately).
- *       * copyCutFlag == 1: `clipStart..clipLast` owns a detached heap list
- *         created by CopySelection() or CopyCut() (must be freed via ClearClip).
- *   - Find/Replace uses separate `findStart..findLast` pointers so searching
- *     never overwrites or leaks the user's clipboard.
+ * Document Linked-List Representation:
+ *   The entire text buffer is stored as a doubly-linked list of `struct NODE`:
+ *
+ *     NULL <- [start] <-> ... <-> [pageFirst] <-> ... <-> [current] <-> ... <-> [last] -> NULL
+ *               ^                     ^                       ^
+ *       document head         first visible node      node immediately LEFT
+ *                             on current page         of the blinking caret
+ *
+ * Caret Anchor Invariant (`current`):
+ *   - `current != NULL`: caret sits immediately AFTER `current` (so inserting
+ *     adds after `current`, and BackSpace deletes `current`).
+ *   - `current == NULL`: caret sits immediately BEFORE `pageFirst` (top-left
+ *     of the currently displayed page, even if scrolled down where
+ *     `pageFirst != start`).
+ *
+ * Clipboard Ownership Invariant (`copyCutFlag`):
+ *   - `copyCutFlag == 0`: `clipStart..clipLast` is either NULL or a LIVE
+ *     selection range whose nodes STILL belong to `start..last`. Never call
+ *     ClearClip() while `copyCutFlag == 0`.
+ *   - `copyCutFlag == 1`: `clipStart..clipLast` is a DETACHED heap-allocated
+ *     list created by CopySelection() (deep copy) or CopyCut() (unlinked span).
+ *     Its endpoints have `clipStart->last == NULL` and `clipLast->next == NULL`,
+ *     and it MUST be freed via ClearClip() before starting a new selection or
+ *     on shutdown.
+ *
+ * Find/Replace Isolation (`findStart`, `findLast`):
+ *   - Find() records the matched document span in `findStart..findLast` rather
+ *     than reusing `clipStart..clipLast`, so searching never clobbers or leaks
+ *     the user's clipboard.
  *****************************************************************************/
 #ifndef _STRUCT_H_
 #define _STRUCT_H_
 
 #include<stdio.h>
 
-/* Input state: mouse coordinates/buttons, pending command, and last key */
+/*
+ * struct MOUSESTATE - Unified hardware input and command-dispatch state.
+ * Holds the latest polled DOS mouse coordinates/button bits, the latest BIOS
+ * keystroke, the pending command ID (`function`), and the active modal state
+ * (`functionActive`).
+ */
 struct MOUSESTATE
 {
-    int x;              /* Current mouse X coordinate (pixels) */
-    int y;              /* Current mouse Y coordinate (pixels) */
-    int mouseFlag;      /* 1 if XOR mouse arrow is currently drawn on screen */
-    int button;         /* Mouse button bitmask from INT 33h/AX=3 (1=left) */
-    int function;       /* Queued command ID dispatched by SwitchFunction() */
-    int functionActive; /* Active modal dialog state (0 = normal editing):
-                         *   1  = Info/warning alert (any key/click dismisses)
-                         *   2  = Save-before-Exit confirmation (Y/N)
-                         *   5  = Find dialog awaiting F (Find) / C (Cancel)
-                         *   6  = Replace dialog awaiting F (Find) / C (Cancel)
-                         *   7  = Replace match found, awaiting R / C
-                         *   9  = Save confirmation (Y/N)
-                         *   10 = Open filename confirmation (Y/N)
-                         *   11 = Save-before-Open confirmation (Y/N)
-                         *   12 = Save-before-New confirmation (Y/N)
-                         *   13 = Select-All active (Ctrl+C/X/Backspace)
-                         *   15 = Save-As filename confirmation (Y/N) */
-    long int key;       /* Full 16-bit BIOS key code from bioskey(0) */
-    int ascii;          /* Low-byte ASCII code extracted from key */
+    int x;              /* Mouse cursor X position in pixels (2..X_MAX-1) */
+    int y;              /* Mouse cursor Y position in pixels (2..Y_MAX-1) */
+    int mouseFlag;      /* 1 = XOR mouse pointer is currently visible on screen;
+                         * 0 = screen was repainted over pointer, draw fresh */
+    int button;         /* INT 33h/AX=3 button bitmask (bit 0 = left button) */
+    int function;       /* One-shot command ID (1..25) consumed by SwitchFunction()
+                         * in main() and reset to 0 immediately afterward */
+    int functionActive; /* Persistent modal UI state (0 = normal editing):
+                         *   0  = Normal text editing
+                         *   1  = Dismissible alert/info popup (any key/click)
+                         *   2  = Exit: "Save?" confirmation (Y=save&exit, N=exit)
+                         *   5  = Find dialog ready (F=find next, C=cancel)
+                         *   6  = Replace dialog ready (F=find next, C=cancel)
+                         *   7  = Replace match highlighted (R=replace, C=cancel)
+                         *   9  = Save confirmation (Y=save, N=cancel)
+                         *   10 = Open filename entered (Y=proceed, N=cancel)
+                         *   11 = Open: "Save current first?" (Y=save&open, N=open)
+                         *   12 = New: "Save current first?" (Y=save&new, N=new)
+                         *   13 = Select-All active (Ctrl+C, Ctrl+X, BackSpace)
+                         *   15 = Save As filename entered (Y=saveas, N=cancel) */
+    long int key;       /* Full 16-bit BIOS key word from bioskey(0) */
+    int ascii;          /* Low 8-bit ASCII code (`key & 0x00ff`) */
 };
 
-/* Active document filename and pending confirmation workflow flags */
+/*
+ * struct FILETYPE - Active document filename and deferred save-prompt flags.
+ */
 struct FILETYPE
 {
-    int fileflag;    /* Set to 1 when title bar filename needs redrawing */
-    char fname[16];  /* Active DOS 8.3 filename buffer (decoupled from spell.name) */
-    int modifyFlag;  /* Deferred modal prompt: 1=Save-before-Open, 2=Save-before-New */
+    int fileflag;    /* 1 = redraw title-bar filename in ViewAll(), then reset to 0 */
+    char fname[16];  /* Dedicated buffer for active DOS 8.3 filename (never aliases
+                      * spell.name so cancelled Open/SaveAs cannot corrupt it) */
+    int modifyFlag;  /* Deferred modal promotion applied at top of main() loop:
+                      *   0 = none
+                      *   1 = promote to functionActive=11 (Save before Open)
+                      *   2 = promote to functionActive=12 (Save before New) */
 };
 
-/* Single character unit in the doubly-linked document list */
+/*
+ * struct NODE - Atomic element of the doubly-linked document list.
+ * Each node stores either a newline, one ASCII character, or one 2-byte
+ * GB2312 Chinese character.
+ */
 struct NODE
 {
-    int flag;        /* Node kind: 0=newline (ENTER), 1=ASCII char, 2=GB2312 Hanzi */
-    int firstInLine; /* 1 if this node starts a visual line on screen, else 0 */
-    char data[3];    /* Null-terminated payload: 1 byte (ASCII) or 2 bytes (GB2312) */
-    struct NODE *last; /* Previous node in document (NULL for head) */
-    struct NODE *next; /* Next node in document (NULL for tail) */
+    int flag;          /* Visual width & payload type:
+                        *   0 = newline / ENTER (advances to next visual row)
+                        *   1 = single-byte printable ASCII (width = 8 px)
+                        *   2 = 2-byte GB2312 Hanzi or custom 'àê' (width = 16 px) */
+    int firstInLine;   /* 1 if this node begins a visual row (recomputed by ViewAll),
+                        * 0 for all interior nodes on a row */
+    char data[3];      /* NUL-terminated character bytes:
+                        *   flag=1 -> data[0]=ascii, data[1]='\0'
+                        *   flag=2 -> data[0]=b0, data[1]=b1, data[2]='\0'
+                        *             (special ' ', ' ' renders custom glyph 'àê') */
+    struct NODE *last; /* Previous node in document (NULL at `start`) */
+    struct NODE *next; /* Next node in document (NULL at `last`) */
 };
 
-/* State for Chinese pinyin input, filename input buffer, and HZK16 font file */
+/*
+ * struct SPELLTYPE - Pinyin IME buffers, filename prompt buffer, and font file.
+ */
 struct SPELLTYPE
 {
-    char name[16];   /* Temporary filename input buffer (max 12 chars + NUL) */
-    char pcode[3];   /* 2-byte GB2312 code of the next Hanzi to insert */
-    FILE *phz;       /* Persistent FILE* handle to HZK16 16x16 bitmap font */
+    char name[16]; /* Temporary filename typed in InName() (up to 12 chars + NUL) */
+    char pcode[3]; /* 2-byte GB2312 code queued for Gethanzi() insertion */
+    FILE *phz;     /* Persistent read-only handle to HZK16 16x16 bitmap font;
+                    * opened lazily on first Chinese draw, closed on exit */
 };
 
-/* Pull-down menu state */
+/*
+ * struct MENUTYPE - State for the four F1..F4 pull-down menus.
+ */
 struct MENUTYPE
 {
-    int menuflag;      /* 0 = active submenu needs redraw; 1 = already drawn */
-    int flag;          /* 1-based index of currently highlighted submenu item */
-    int SubmenuNum[4]; /* Item count for menus F1..F4: {5, 4, 2, 2} */
+    int menuflag;      /* 0 = dropdown needs repainting; 1 = up to date on screen */
+    int flag;          /* 1-based highlighted item index inside active dropdown */
+    int SubmenuNum[4]; /* Item counts per top-level menu: F1=5, F2=4, F3=2, F4=2 */
 };
 
-/* Master editor context passed to all subsystems */
+/*
+ * struct EDITTYPE - Master editor context owned by main() and passed by
+ *                   pointer to every module (eliminates mutable globals).
+ */
 struct EDITTYPE
 {
-    /* Document, clipboard, find-match, and viewport linked-list pointers */
-    struct NODE *start;     /* First node in the entire document */
-    struct NODE *current;   /* Node immediately left of caret (NULL = before pageFirst) */
-    struct NODE *last;      /* Last node in the entire document */
-    struct NODE *clipStart; /* Start of selection or detached clipboard list */
-    struct NODE *clipLast;  /* End of selection or detached clipboard list */
-    struct NODE *findStart; /* Start of most recent Find() match in document */
-    struct NODE *findLast;  /* End of most recent Find() match in document */
-    struct NODE *pageFirst; /* First node displayed at top-left of viewport */
+    /* Document, selection/clipboard, find-match, and viewport anchors */
+    struct NODE *start;     /* Head of document list (NULL when empty) */
+    struct NODE *current;   /* Node left of caret (NULL = before pageFirst) */
+    struct NODE *last;      /* Tail of document list (NULL when empty) */
+    struct NODE *clipStart; /* First node of selection or detached clipboard */
+    struct NODE *clipLast;  /* Last node of selection or detached clipboard */
+    struct NODE *findStart; /* First node of latest Find() match (non-owning) */
+    struct NODE *findLast;  /* Last node of latest Find() match (non-owning) */
+    struct NODE *pageFirst; /* First node drawn at top-left of viewport */
 
-    /* Layout and caret state */
-    int lineCount; /* Number of visual line breaks from pageFirst to end of doc */
-    int language;  /* Input mode: 0 = English (ASCII), 1 = Chinese (Pinyin) */
-    int x;         /* Caret pixel X coordinate */
-    int y;         /* Caret baseline pixel Y coordinate */
-    int line;      /* Cached 1-based line number shown on status bar */
-    int row;       /* Cached 1-based column number shown on status bar */
+    /* Layout and status-bar display state */
+    int lineCount; /* Count of visual line breaks from pageFirst to end of doc */
+    int language;  /* 0 = English (ASCII) input; 1 = Chinese (Pinyin IME) input */
+    int x;         /* Caret pixel X coordinate (EDITERSCREENX1 .. maxX) */
+    int y;         /* Caret baseline pixel Y (EDITERSCREENY1+16 .. EDITERSCREENY2) */
+    int line;      /* Last rendered 1-based absolute line number on status bar */
+    int row;       /* Last rendered 1-based column number on status bar */
 
-    /* Scrollbar & status-bar change-detection caches (avoid idle traversals) */
-    int tempLineCount;
-    int tempCurrentCount;
-    struct NODE *lastPosCurrent;
-    struct NODE *lastPosPageFirst;
-    int lastPosX;
-    int lastPosY;
-    struct NODE *lastRollPageFirst;
+    /* Idle-frame change-detection caches for RollBar() and ShowPosition():
+     * Avoid walking the linked list on every main-loop iteration when idle. */
+    int tempLineCount;              /* Cached lineCount for RollBar() */
+    int tempCurrentCount;           /* Cached scroll line count (0 forces draw) */
+    struct NODE *lastPosCurrent;    /* Cached `current` for ShowPosition() */
+    struct NODE *lastPosPageFirst;  /* Cached `pageFirst` for ShowPosition() */
+    int lastPosX;                   /* Cached caret X (-1 forces initial draw) */
+    int lastPosY;                   /* Cached caret Y (-1 forces initial draw) */
+    struct NODE *lastRollPageFirst; /* Cached `pageFirst` for RollBar() */
 
-    /* Editor interaction state and flags */
+    /* Interaction state and dirty/control flags */
     struct MOUSESTATE state;
-    int cursorFlag;   /* 1 = recompute caret (x, y) from current node */
-    int editFlag;     /* 1 = clear and redraw editor viewport via ViewAll() */
-    int editActive;   /* 0 = editing mode; 1..4 = pull-down menu F1..F4 open */
-    int copyActive;   /* 1 = clipboard holds valid content ready for Paste() */
-    int copyCutFlag;  /* 1 = clipStart..clipLast owns detached heap memory */
-    int clipFlag;     /* 1 = reset selection pointers on next selection start */
-    int pageDownFlag; /* 1 or 2 = defer a DOWN cursor step after page scroll */
-    char findGoal[14];    /* Search query buffer (up to 13 ASCII chars + NUL) */
-    char replaceGoal[14]; /* Replacement string buffer (up to 12 chars + NUL) */
+    int cursorFlag;   /* 1 = recalculate (x, y) from `current` in DrawCursor() */
+    int editFlag;     /* 1 = repaint entire text viewport in ViewAll() */
+    int editActive;   /* 0 = editing/modal mode; 1..4 = pull-down F1..F4 open */
+    int copyActive;   /* 1 = detached clipboard is populated and ready for Paste */
+    int copyCutFlag;  /* 1 = clipStart..clipLast owns detached heap nodes */
+    int clipFlag;     /* 1 = clear live selection pointers on next selection */
+    int pageDownFlag; /* 1 or 2 = inject a synthetic DOWN step after scroll-down */
+    char findGoal[14];    /* Search target string (max 13 chars + NUL) */
+    char replaceGoal[14]; /* Replacement string (max 12 chars + NUL) */
 
     struct SPELLTYPE spell;
     struct MENUTYPE submenu;

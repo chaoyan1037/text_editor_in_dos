@@ -1,8 +1,14 @@
 /*****************************************************************************
  * File: SUBMENUS.C
- * Function: Pull-down submenu rendering (F1..F4), keyboard navigation within
- *           open menus, command dispatch, and Help information popups.
+ * Purpose: Pull-down submenu rendering (F1..F4), keyboard navigation within
+ *          open dropdowns, menu item -> command mapping, and Help popups.
  * Programmer: XiaoYao (2011.10.5-2011.10.7)
+ *
+ * Menu Geometry (each item is 80 px wide x 30 px tall, starting at Y=50):
+ *   - F1 File  (X=5..85,   5 items): Open, New, Save, Save As, Close
+ *   - F2 Edit  (X=95..175, 4 items): Cut, Copy, Paste, Select All
+ *   - F3 Tools (X=185..265,2 items): Find, Find & Replace
+ *   - F4 Help  (X=275..355,2 items): Operation Guide, About/Credits
  *****************************************************************************/
 #include<graphics.h>
 #include<bios.h>
@@ -21,13 +27,18 @@ void SubmenuF4(struct EDITTYPE *pEdit);
 void EnterFunction(struct EDITTYPE *pEdit);
 static void DrawSubmenuBox(int x1, int x2, char *items[], int count, struct EDITTYPE *pEdit);
 
-/*
- * DrawSubmenuBox - Shared renderer for all four pull-down menus.
+/*****************************************************************************
+ * Function: DrawSubmenuBox
+ * Purpose:  Shared renderer for all four pull-down menus.
  *
- * Draws only when `submenu.menuflag == 0`, painting the yellow dropdown panel,
- * the green beveled highlight bar for item `submenu.flag` (1-based), and all
- * Chinese item labels spaced 30 pixels apart vertically.
- */
+ * @param x1,x2 Horizontal span of the dropdown panel.
+ * @param items Array of `count` GB2312 Chinese menu item labels.
+ * @param count Number of items in the menu (height = 30 * count px).
+ * @param pEdit Editor context (`submenu.menuflag` gates repainting;
+ *              `submenu.flag` selects the 1-based highlighted row).
+ * @post        Sets `submenu.menuflag = 1` so subsequent idle frames do not
+ *              flicker by repainting the dropdown repeatedly.
+ *****************************************************************************/
 static void DrawSubmenuBox(int x1, int x2, char *items[], int count, struct EDITTYPE *pEdit)
 {
 	int i;
@@ -41,6 +52,7 @@ static void DrawSubmenuBox(int x1, int x2, char *items[], int count, struct EDIT
 	selY1=50+30*(pEdit->submenu.flag-1);
 	selY2=80+30*(pEdit->submenu.flag-1);
 
+	/* Yellow panel background + green beveled selection bar */
 	setfillstyle(SOLID_FILL, YELLOW);
 	bar(x1, 50, x2, 50+30*count);
 
@@ -57,7 +69,7 @@ static void DrawSubmenuBox(int x1, int x2, char *items[], int count, struct EDIT
 	}
 }
 
-/* SubmenuF1 - File menu: Open, New, Save, Save As, Close */
+/* SubmenuF1 - Render File menu (Open, New, Save, Save As, Close) */
 void SubmenuF1(struct EDITTYPE *pEdit)
 {
 	char *menu[5];
@@ -69,7 +81,7 @@ void SubmenuF1(struct EDITTYPE *pEdit)
 	DrawSubmenuBox(5, 85, menu, 5, pEdit);
 }
 
-/* SubmenuF2 - Edit menu: Cut, Copy, Paste, Select All */
+/* SubmenuF2 - Render Edit menu (Cut, Copy, Paste, Select All) */
 void SubmenuF2(struct EDITTYPE *pEdit)
 {
 	char *menu[4];
@@ -80,7 +92,7 @@ void SubmenuF2(struct EDITTYPE *pEdit)
 	DrawSubmenuBox(95, 175, menu, 4, pEdit);
 }
 
-/* SubmenuF3 - Tools menu: Find, Find & Replace */
+/* SubmenuF3 - Render Tools menu (Find, Find & Replace) */
 void SubmenuF3(struct EDITTYPE *pEdit)
 {
 	char *menu[2];
@@ -89,7 +101,7 @@ void SubmenuF3(struct EDITTYPE *pEdit)
 	DrawSubmenuBox(185, 265, menu, 2, pEdit);
 }
 
-/* SubmenuF4 - Help menu: Operation Guide, About */
+/* SubmenuF4 - Render Help menu (Operation Guide, About) */
 void SubmenuF4(struct EDITTYPE *pEdit)
 {
 	char *menu[2];
@@ -98,11 +110,14 @@ void SubmenuF4(struct EDITTYPE *pEdit)
 	DrawSubmenuBox(275, 355, menu, 2, pEdit);
 }
 
-/*
- * GetSubmenu - Activate the pull-down menu corresponding to F1..F4.
- * When triggered via mouse click, `state.key` is 0 so `editActive` set by
- * ChooseSubmenu() is preserved untouched.
- */
+/*****************************************************************************
+ * Function: GetSubmenu
+ * Purpose:  Open the pull-down menu requested by F1..F4 (or mouse click).
+ *
+ * @param pEdit Editor context. When opened by mouse click, ChooseSubmenu()
+ *              sets `state.key = 0` and pre-populates `editActive`, so the
+ *              switch leaves `editActive` intact while arming `menuflag = 0`.
+ *****************************************************************************/
 void GetSubmenu(struct EDITTYPE *pEdit)
 {
 	pEdit->submenu.menuflag=0;
@@ -116,9 +131,13 @@ void GetSubmenu(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * Submenu - Draw the active pull-down menu and process UP/DOWN/ENTER/ESC keys.
- */
+/*****************************************************************************
+ * Function: Submenu
+ * Purpose:  Main-loop handler while a pull-down menu is open (`editActive!=0`).
+ *           Draws the active dropdown and handles UP/DOWN/ENTER/ESC keys.
+ *
+ * @param pEdit Master editor context.
+ *****************************************************************************/
 void Submenu(struct EDITTYPE *pEdit)
 {
 	switch(pEdit->editActive)
@@ -162,10 +181,14 @@ void Submenu(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * EnterFunction - Map the highlighted `(editActive, submenu.flag)` item to
- *                 its queued command ID (`state.function`) or Help popup.
- */
+/*****************************************************************************
+ * Function: EnterFunction
+ * Purpose:  Execute the currently highlighted menu item by queuing its
+ *           corresponding `state.function` command ID (or displaying a Help
+ *           popup directly) and closing the dropdown menu.
+ *
+ * @param pEdit Master editor context.
+ *****************************************************************************/
 void EnterFunction(struct EDITTYPE *pEdit)
 {
 	switch(pEdit->editActive)
@@ -221,10 +244,15 @@ void EnterFunction(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * ExitSubmenu - Close any open pull-down menu, repaint its top-bar button,
- *               and request a viewport redraw to erase the dropdown overlay.
- */
+/*****************************************************************************
+ * Function: ExitSubmenu
+ * Purpose:  Dismiss the active pull-down menu, restore its top-bar button,
+ *           and schedule a viewport repaint to erase the dropdown overlay.
+ *
+ * @param pEdit Master editor context.
+ * @post        `editActive = 0`, `submenu.flag = 1`, `editFlag = 1`,
+ *              `state.mouseFlag = 0`, text justification restored to BOTTOM.
+ *****************************************************************************/
 void ExitSubmenu(struct EDITTYPE *pEdit)
 {
 	int temp=pEdit->editActive;
@@ -244,10 +272,14 @@ void ExitSubmenu(struct EDITTYPE *pEdit)
 	settextjustify(LEFT_TEXT, BOTTOM_TEXT);
 }
 
-/*
- * OperationDirection - Display the usage tips popup box.
- * Sets `functionActive = 1` so any subsequent key or click dismisses it.
- */
+/*****************************************************************************
+ * Function: OperationDirection
+ * Purpose:  Display the yellow "操作指南" usage tips popup (275..470 x 50..145).
+ *
+ * @param pEdit Master editor context.
+ * @post        Closes menu (`editActive = 0`) and sets `functionActive = 1`
+ *              so any keypress or mouse click cleanly dismisses the popup.
+ *****************************************************************************/
 void OperationDirection(struct EDITTYPE *pEdit)
 {
 	int i;
@@ -272,10 +304,15 @@ void OperationDirection(struct EDITTYPE *pEdit)
 	pEdit->state.functionActive=1;
 }
 
-/*
- * Explanation - Display the author credits popup box (including custom '垚').
- * Sets `functionActive = 1` so any subsequent key or click dismisses it.
- */
+/*****************************************************************************
+ * Function: Explanation
+ * Purpose:  Display the yellow "制作人员" credits popup (275..470 x 50..145),
+ *           combining HZK16 text with custom bitmap OutputYao() for "肖垚".
+ *
+ * @param pEdit Master editor context.
+ * @post        Closes menu (`editActive = 0`) and sets `functionActive = 1`
+ *              so any keypress or mouse click cleanly dismisses the popup.
+ *****************************************************************************/
 void Explanation(struct EDITTYPE *pEdit)
 {
 	int i;

@@ -1,18 +1,21 @@
 /*****************************************************************************
  * File: VIEW.C
- * Function: Redraw the visible text viewport from `pageFirst` and update
- *           title-bar filename changes.
+ * Purpose: Viewport text renderer, visual line-wrap metadata synchronizer,
+ *          and title-bar filename updater.
  * Programmer: YanChao (2011.9.11-2011.9.12)
  *
- * Rendering & Layout Details:
- *   - Runs only when `editFlag == 1` (text area) or `file.fileflag == 1`
- *     (title bar).
- *   - Consecutive ASCII characters (`flag == 1`) on the same visual line are
- *     batched into `asciiBuf` and flushed with a single `outtextxy()` call to
- *     minimize BGI overhead.
- *   - Recomputes `firstInLine` on every node from `pageFirst` to the end of
- *     the document (clearing stale flags from prior edits) and updates
- *     `pEdit->lineCount` so scrolling, status bar, and scrollbar stay exact.
+ * Design & Optimization Details:
+ *   1. Dirty-flag driven: only repaints the viewport when `editFlag == 1` and
+ *      the title bar when `file.fileflag == 1`.
+ *   2. ASCII Run Batching: BGI's default 8x8 bitmap font advances 8 px per
+ *      character (matching `CHARSIZE`). Collecting consecutive `flag == 1`
+ *      nodes on the same row into `asciiBuf` reduces `outtextxy()` calls by
+ *      up to 75x per line with pixel-identical output.
+ *   3. `firstInLine` Resynchronization: Every edit can shift soft-wrap points
+ *      on subsequent lines. ViewAll() clears `pNode->next->firstInLine = 0`
+ *      before each wrap/newline test and continues scanning past EDITERSCREENY2
+ *      (without drawing) so `lineCount` and `firstInLine` remain exact across
+ *      the entire tail of the document.
  *****************************************************************************/
 #include<graphics.h>
 #include<stdlib.h>
@@ -23,10 +26,20 @@
 #include"h/spell.h"
 #include"h/view.h"
 
-/*
- * ViewAll - Repaint the text viewport when `editFlag == 1` and the title bar
- *           filename when `file.fileflag == 1`.
- */
+/*****************************************************************************
+ * Function: ViewAll
+ * Purpose:  Redraw visible document contents from `pageFirst` and refresh the
+ *           title-bar filename whenever their respective dirty flags are set.
+ *
+ * @param pEdit Master editor context.
+ * @post        - When `editFlag == 1`: clears viewport (X=5..614, Y=50..450),
+ *                draws visible text, updates `firstInLine` and `lineCount`,
+ *                clears `editFlag = 0`, sets `cursorFlag = 1`, and resets
+ *                `state.mouseFlag = 0` (since the mouse arrow was painted over).
+ *              - When `file.fileflag == 1`: repaints active filename at (5,15)
+ *                and resets `file.fileflag = 0`.
+ * @complexity  O(R) where R = number of nodes from `pageFirst` to `last`.
+ *****************************************************************************/
 void ViewAll(struct EDITTYPE *pEdit)
 {
 	if( pEdit->editFlag==1 )
@@ -38,14 +51,14 @@ void ViewAll(struct EDITTYPE *pEdit)
 		int asciiLen=0;
 		int asciiStartX=EDITERSCREENX1;
 
-		/* Clear client area (excluding the 20px right-hand scrollbar) */
+		/* Repaint white canvas inside viewport (leaving 20px scrollbar intact) */
 		setcolor(BLACK);
 		settextjustify(LEFT_TEXT, BOTTOM_TEXT);
 		setfillstyle(SOLID_FILL, WHITE);
 		bar(EDITERSCREENX1, EDITERSCREENY1, EDITERSCREENX2-20, EDITERSCREENY2);
-		pEdit->state.mouseFlag=0; /* Background redrawn; mouse must redraw fresh */
+		pEdit->state.mouseFlag=0;
 		pEdit->editFlag=0;
-		pEdit->cursorFlag=1;      /* Re-sync caret after viewport redraw */
+		pEdit->cursorFlag=1;
 
 		pEdit->lineCount=0;
 		if(pNode!=NULL)
@@ -54,7 +67,7 @@ void ViewAll(struct EDITTYPE *pEdit)
 		}
 		while(pNode!=NULL)
 		{
-			/* Clear stale firstInLine before deciding whether this node wraps */
+			/* Reset next node's line-start flag before evaluating wrap/newline */
 			if(pNode->next!=NULL)
 			{
 				pNode->next->firstInLine=0;
@@ -62,7 +75,7 @@ void ViewAll(struct EDITTYPE *pEdit)
 
 			if(pNode->flag==0)
 			{
-				/* Explicit newline: flush pending ASCII run and advance row */
+				/* Hard newline: flush buffered ASCII run and move to next row */
 				if(asciiLen>0)
 				{
 					asciiBuf[asciiLen]='\0';
@@ -79,7 +92,7 @@ void ViewAll(struct EDITTYPE *pEdit)
 			}
 			else if(pNode->flag==1)
 			{
-				/* Accumulate visible ASCII characters into a single BGI run */
+				/* Buffer visible ASCII glyphs into a contiguous horizontal run */
 				if(y<=EDITERSCREENY2)
 				{
 					if(asciiLen==0)
@@ -103,7 +116,7 @@ void ViewAll(struct EDITTYPE *pEdit)
 			}
 			else if(pNode->flag==2)
 			{
-				/* Chinese glyph (16x16): flush ASCII run first, then draw glyph */
+				/* Flush pending ASCII run before plotting a 16x16 Hanzi bitmap */
 				if(asciiLen>0)
 				{
 					asciiBuf[asciiLen]='\0';
@@ -112,7 +125,7 @@ void ViewAll(struct EDITTYPE *pEdit)
 				}
 				if(y<=EDITERSCREENY2)
 				{
-					/* Special pair (' ', ' ') with flag=2 represents custom glyph 'ˆ' */
+					/* Special pair (' ', ' ') with flag=2 draws hardcoded glyph 'ˆ' */
 					if( (pNode->data[0]==' ')&&(pNode->data[1]==' ') )
 					{
 						OutputYao(x, y-CHARHIGH, BLACK);
@@ -125,7 +138,7 @@ void ViewAll(struct EDITTYPE *pEdit)
 				x+=2*CHARSIZE;
 			}
 
-			/* Soft word-wrap when visual column reaches or exceeds CHARINLINE */
+			/* Soft wrap at column CHARINLINE (605 px) to match GetNodePosi() */
 			if( x>=maxX )
 			{
 				if(asciiLen>0)
@@ -144,7 +157,7 @@ void ViewAll(struct EDITTYPE *pEdit)
 			}
 			pNode=pNode->next;
 		}
-		/* Flush any trailing ASCII run on the last visible line */
+		/* Flush any remaining ASCII characters on the final visible line */
 		if(asciiLen>0 && y<=EDITERSCREENY2)
 		{
 			asciiBuf[asciiLen]='\0';
@@ -152,7 +165,7 @@ void ViewAll(struct EDITTYPE *pEdit)
 		}
 	}
 
-	/* Refresh active filename in the blue top title bar when changed */
+	/* Redraw top-left title-bar filename whenever Open/New/SaveAs changes it */
 	if(pEdit->file.fileflag==1)
 	{
 		setfillstyle(SOLID_FILL, LIGHTBLUE);

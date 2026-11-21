@@ -1,7 +1,7 @@
 /*****************************************************************************
  * File: LANGUAGE.C
- * Function: Insert ASCII characters, insert newline (ENTER) nodes, and toggle
- *           between English (ASCII) and Chinese (Pinyin) input modes.
+ * Purpose: Single-byte ASCII insertion, newline (ENTER) insertion, and
+ *          English/Chinese input mode switching.
  * Programmer: YanChao (2011.9.16-2011.9.18)
  *****************************************************************************/
 #include<stdlib.h>
@@ -11,13 +11,17 @@
 #include"h/malloc.h"
 #include"h/language.h"
 
-/*
- * GetEnglish - Insert the printable ASCII character in `pEdit->state.ascii`
- *              at the current caret position (flag = 1).
+/*****************************************************************************
+ * Function: GetEnglish
+ * Purpose:  Insert the printable ASCII byte stored in `pEdit->state.ascii`
+ *           at the active caret position as a `flag = 1` node.
  *
- * Safely handles empty documents, appending at tail, and inserting when
- * `current == NULL` (before `pageFirst`). Triggers viewport and caret redraws.
- */
+ * @param pEdit Master editor context (`state.ascii` must be in 0x20..0x7E).
+ * @post        - Document list has one new node at `pEdit->current`.
+ *              - Sets `editFlag = 1` and `cursorFlag = 1` to schedule redraw.
+ * @note        Checks `pEdit->current != NULL` before testing `current->next`
+ *              so typing at top-left of a non-empty page routes to InsertNode().
+ *****************************************************************************/
 void GetEnglish(struct EDITTYPE *pEdit)
 {
 	char data[2]="h";
@@ -42,12 +46,16 @@ void GetEnglish(struct EDITTYPE *pEdit)
 	}
 }
 
-/*
- * GetEnter - Insert a newline node (flag = 0) at the current caret position.
+/*****************************************************************************
+ * Function: GetEnter
+ * Purpose:  Insert a newline (`flag = 0`) node at the active caret position.
  *
- * If the caret is already on the bottom visible row (EDITERSCREENY2), sets
- * `pageDownFlag = 2` so the main loop scrolls the viewport down by one line.
- */
+ * @param pEdit Master editor context.
+ * @post        - New `flag = 0` node inserted at `pEdit->current`.
+ *              - Sets `editFlag = 1` and `cursorFlag = 1`.
+ *              - If the caret was on the bottom visible row (`y == EDITERSCREENY2`),
+ *                sets `pageDownFlag = 2` so main() scrolls down by one line.
+ *****************************************************************************/
 void GetEnter(struct EDITTYPE *pEdit)
 {
 	char data[2]="h";
@@ -72,15 +80,19 @@ void GetEnter(struct EDITTYPE *pEdit)
 	}
 	pEdit->current->flag=0;
 
+	/* Pressing Enter on row 25 defers a scroll-down step to the next loop pass */
 	if(pEdit->y==EDITERSCREENY2)
 	{
 		pEdit->pageDownFlag=2;
 	}
 }
 
-/*
- * ExchangeLanguage - Toggle active input mode between English (0) and Chinese (1).
- */
+/*****************************************************************************
+ * Function: ExchangeLanguage
+ * Purpose:  Toggle `pEdit->language` between English (0) and Chinese IME (1).
+ *
+ * @param pEdit Master editor context.
+ *****************************************************************************/
 void ExchangeLanguage(struct EDITTYPE *pEdit)
 {
 	if(pEdit->language==1)
