@@ -1,3 +1,7 @@
+/*****************************************************************************
+ * File: INNAME.H
+ * Purpose: Modal filename input dialog used by Open and Save As commands.
+ *****************************************************************************/
 #ifndef _INNAME_H_
 #define _INNAME_H_
 

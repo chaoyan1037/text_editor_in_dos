@@ -1,10 +1,10 @@
-/*********************************************
-function: draw mainmenu,submenu,and dialog box
-
-programmer: YanChao
-
-time：2011.9.10-2011.10.29
-*********************************************/
+/*****************************************************************************
+ * File: DRAWMENU.C
+ * Function: Initialize VGA graphics and draw main window chrome, top menu
+ *           bar buttons, XOR text caret, proportional vertical scrollbar,
+ *           and 1-based line/column status bar readout.
+ * Programmer: YanChao (2011.9.10-2011.10.29)
+ *****************************************************************************/
 #include<graphics.h>
 #include<conio.h>
 #include<stdio.h>
@@ -19,27 +19,35 @@ time：2011.9.10-2011.10.29
 void LocateRow(struct EDITTYPE *pEdit, int *pRow);
 void LocateLine(struct EDITTYPE *pEdit, int *pLine);
 
-/****************画主界面*****************/
+/*
+ * DrawMainMenu - Enter 640x480 VGA BGI graphics mode and draw the initial
+ *                editor shell (title bar, menu buttons, white viewport,
+ *                Exit button, and EN/ZH input mode toggle).
+ */
 void DrawMainMenu(struct EDITTYPE *pEdit)
 {
 	int gd=VGA, gm=VGAHI;
-	/* modify the dir according to your case */
+	/* Modify the BGI driver path below if TC 3.0 is installed elsewhere */
 	initgraph(&gd, &gm, "C://TC30//BGI");
 	cleardevice();
 
+	/* Window background frame */
 	setwritemode(COPY_PUT);
 	setfillstyle(SOLID_FILL, LIGHTGRAY);
 	bar(0, 0, 639, 479);
 
+	/* Text editing canvas */
 	setfillstyle(SOLID_FILL, WHITE);
 	bar(EDITERSCREENX1, EDITERSCREENY1, EDITERSCREENX2, EDITERSCREENY2);
 
+	/* Top title bar and Exit button */
 	setfillstyle(SOLID_FILL, LIGHTBLUE);
-	bar(0, 0, X_MAX, 25);    /* blue rectangle */
+	bar(0, 0, X_MAX, 25);
 	setcolor(BLACK);
 	rectangle(595, 3, 635, 22);
 	WhiteBlack(595, 3, 635, 22, WHITE);
 
+	/* Four top-level menu buttons: File, Edit, Tools, Help */
 	DrawMenu1(pEdit);
 	DrawMenu2(pEdit);
 	DrawMenu3(pEdit);
@@ -50,7 +58,8 @@ void DrawMainMenu(struct EDITTYPE *pEdit)
 
 	ShowLanguage(pEdit);
 }
-/****************画文件菜单*****************/
+
+/* DrawMenu1 - Render the File (<F1>) top-bar menu button */
 void DrawMenu1(struct EDITTYPE *pEdit)
 {
 	char *menu="文件";
@@ -64,7 +73,8 @@ void DrawMenu1(struct EDITTYPE *pEdit)
 	rectangle(4, 27, 70, 48);
 	WhiteBlack(4, 27, 70, 48, WHITE);
 }
-/****************画编辑菜单*****************/
+
+/* DrawMenu2 - Render the Edit (<F2>) top-bar menu button */
 void DrawMenu2(struct EDITTYPE *pEdit)
 {
 	char *menu="编辑";
@@ -78,7 +88,8 @@ void DrawMenu2(struct EDITTYPE *pEdit)
 	rectangle(94, 27, 160, 48);
 	WhiteBlack(94, 27, 160, 48, WHITE);
 }
-/****************画工具菜单*****************/
+
+/* DrawMenu3 - Render the Tools (<F3>) top-bar menu button */
 void DrawMenu3(struct EDITTYPE *pEdit)
 {
 	char *menu="工具";
@@ -92,7 +103,8 @@ void DrawMenu3(struct EDITTYPE *pEdit)
 	rectangle(184, 27, 250, 48);
 	WhiteBlack(184, 27, 250, 48, WHITE);
 }
-/****************画帮助菜单*****************/
+
+/* DrawMenu4 - Render the Help (<F4>) top-bar menu button */
 void DrawMenu4(struct EDITTYPE *pEdit)
 {
 	char *menu="帮助";
@@ -106,7 +118,12 @@ void DrawMenu4(struct EDITTYPE *pEdit)
 	rectangle(274, 27, 340, 48);
 	WhiteBlack(274, 27, 340, 48, WHITE);
 }
-/******************画光标******************/
+
+/*
+ * DrawCursor - Recompute caret coordinates when `cursorFlag == 1` and toggle
+ *              the 8px underline cursor in XOR mode so it blinks without
+ *              destroying underlying pixels.
+ */
 void DrawCursor(struct EDITTYPE *pEdit)
 {
 	int x=pEdit->x, y=pEdit->y;
@@ -125,7 +142,15 @@ void DrawCursor(struct EDITTYPE *pEdit)
 	}
 	line(x, y, x+8, y);
 }
-/****************画滚动条*****************/
+
+/*
+ * RollBar - Draw the proportional right-hand scrollbar track, thumb, and
+ *           up/down arrow triangles.
+ *
+ * Caches `(pageFirst, lineCount)` so idle iterations of the main loop return
+ * immediately without traversing the linked list. Uses 32-bit `long` math to
+ * compute thumb height and offset safely without 16-bit overflow or divide-by-0.
+ */
 void RollBar(struct EDITTYPE *pEdit)
 {
 	int linesBefore=0;
@@ -137,6 +162,7 @@ void RollBar(struct EDITTYPE *pEdit)
 	int thumbHeight, thumbY;
 	struct NODE *pNode;
 
+	/* Fast path: nothing scrolled and line count unchanged */
 	if(pEdit->lastRollPageFirst==pEdit->pageFirst
 		&& pEdit->tempLineCount==pEdit->lineCount
 		&& pEdit->tempCurrentCount!=0)
@@ -144,10 +170,11 @@ void RollBar(struct EDITTYPE *pEdit)
 		return;
 	}
 
+	/* Count visual lines scrolled off the top before pageFirst */
 	pNode=pEdit->start;
 	while(pNode!=NULL && pNode!=pEdit->pageFirst)
 	{
-		if(pNode->firstInLine) /* 是否是行首节点 */
+		if(pNode->firstInLine)
 		{
 			linesBefore++;
 		}
@@ -159,6 +186,7 @@ void RollBar(struct EDITTYPE *pEdit)
 	pEdit->tempCurrentCount=currentCount;
 	pEdit->tempLineCount=pEdit->lineCount;
 
+	/* Compute proportional thumb size and vertical offset within track */
 	totalLines=linesBefore+pEdit->lineCount+1;
 	if(totalLines<CHARINROW)
 	{
@@ -195,6 +223,7 @@ void RollBar(struct EDITTYPE *pEdit)
 		}
 	}
 
+	/* Draw track background, thumb rectangle, and top/bottom scroll arrows */
 	setwritemode(COPY_PUT);
 	setfillstyle(SOLID_FILL, LIGHTBLUE);
 	bar(EDITERSCREENX2-20, EDITERSCREENY1, EDITERSCREENX2, EDITERSCREENY2);
@@ -205,19 +234,27 @@ void RollBar(struct EDITTYPE *pEdit)
 	setcolor(BLACK);
 	rectangle(EDITERSCREENX2-18, thumbY, EDITERSCREENX2-2, thumbY+thumbHeight);
 
+	/* Up-arrow button triangle */
 	moveto(EDITERSCREENX2-18, EDITERSCREENY1+14);
 	lineto(EDITERSCREENX2-2,  EDITERSCREENY1+14);
 	lineto(EDITERSCREENX2-10, EDITERSCREENY1+2);
 	lineto(EDITERSCREENX2-18, EDITERSCREENY1+14);
 	floodfill(EDITERSCREENX2-10, EDITERSCREENY1+5, BLACK);
 
+	/* Down-arrow button triangle */
 	moveto(EDITERSCREENX2-18, EDITERSCREENY2-14);
 	lineto(EDITERSCREENX2-2,  EDITERSCREENY2-14);
 	lineto(EDITERSCREENX2-10, EDITERSCREENY2-2);
 	lineto(EDITERSCREENX2-18, EDITERSCREENY2-14);
 	floodfill(EDITERSCREENX2-10, EDITERSCREENY2-5, BLACK);
 }
-/*********************显示行列********************/
+
+/*
+ * ShowPosition - Update the bottom-right "行:N 列:M" status bar indicator.
+ *
+ * Uses change-detection caching on `(current, pageFirst, x, y)` so idle loop
+ * iterations skip linked-list scans completely.
+ */
 void ShowPosition(struct EDITTYPE *pEdit)
 {
 	int x0=pEdit->row;
@@ -260,7 +297,11 @@ void ShowPosition(struct EDITTYPE *pEdit)
 		outtextxy(605, 475, row);
 	}
 }
-/******************find row*************************/
+
+/*
+ * LocateRow - Compute the 1-based character column number at the caret
+ *             by walking backward from `current` to the line's firstInLine node.
+ */
 void LocateRow(struct EDITTYPE *pEdit, int *pRow)
 {
 	int x=pEdit->x;
@@ -281,7 +322,11 @@ void LocateRow(struct EDITTYPE *pEdit, int *pRow)
 	}
 	(*pRow)++;
 }
-/******************locate line********************/
+
+/*
+ * LocateLine - Compute the 1-based absolute document line number of the caret
+ *              by combining the viewport row index with scrolled-off lines.
+ */
 void LocateLine(struct EDITTYPE *pEdit, int *pLine)
 {
 	struct NODE *pNode=pEdit->start;
@@ -292,7 +337,7 @@ void LocateLine(struct EDITTYPE *pEdit, int *pLine)
 	}
 	while(pNode!=NULL && pNode!=pEdit->pageFirst)
 	{
-		if(pNode->firstInLine) /* 是否是行首节点 */
+		if(pNode->firstInLine)
 		{
 			y++;
 		}

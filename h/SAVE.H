@@ -1,3 +1,7 @@
+/*****************************************************************************
+ * File: SAVE.H
+ * Purpose: Save confirmation dialog and text serialization (Save / Save As).
+ *****************************************************************************/
 #ifndef _SAVE_H_
 #define _SAVE_H_
 

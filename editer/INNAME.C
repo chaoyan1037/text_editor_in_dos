@@ -1,11 +1,9 @@
-
-/**********************************************
-function£ºinput filename
-
-programmer:Xiao
-
-time£º2011.10.11
-***********************************************/
+/*****************************************************************************
+ * File: INNAME.C
+ * Function: Modal dialog to read a DOS 8.3 filename (up to 12 characters)
+ *           into `pEdit->spell.name` for Open and Save As operations.
+ * Programmer: Xiao (2011.10.11)
+ *****************************************************************************/
 
 #include<graphics.h>
 #include<bios.h>
@@ -15,6 +13,15 @@ time£º2011.10.11
 #include"h/hanzi.h"
 #include"h/inname.h"
 
+/*
+ * InName - Draw the filename prompt dialog and poll BIOS keyboard input.
+ *
+ * Accepts up to 12 printable ASCII characters (matching DOS 8.3 format) and
+ * stores a NUL-terminated string in `pEdit->spell.name` (size 16).
+ *   - ENTER: confirms typed text and exits loop (caller handles Y/N confirm).
+ *   - ESC:   clears `pEdit->spell.name` and cancels the dialog immediately.
+ *   - BACKSPACE: deletes the last typed character.
+ */
 void InName(struct EDITTYPE *pEdit)
 {
 	long int key;
@@ -22,6 +29,7 @@ void InName(struct EDITTYPE *pEdit)
 	int letter;
 	pEdit->spell.name[0]='\0';
 
+	/* Dialog frame and OK / Cancel buttons */
 	setfillstyle(SOLID_FILL, LIGHTGRAY);
 	bar(240, 160, 380, 240);
 	button3d(240, 160, 380, 240);
@@ -34,6 +42,7 @@ void InName(struct EDITTYPE *pEdit)
 	WhiteBlack(245+69, 160+54, 380-6, 240-8, WHITE);
 	setcolor(BLACK);
 
+	/* Prompt label and green text input box */
 	Printfhz(250, 165, "ÎÄ¼þÃû£¿", RED, pEdit);
 	setfillstyle(SOLID_FILL, LIGHTGREEN);
 	bar(240+10, 160+25, 380-18, 240-35);
@@ -48,6 +57,7 @@ void InName(struct EDITTYPE *pEdit)
 	outtextxy(283, 230, "(Y)");
 	outtextxy(351, 230, "(N)");
 
+	/* Modal keyboard input loop */
 	while(1)
 	{
 		if(bioskey(1)!=0)
@@ -86,6 +96,9 @@ void InName(struct EDITTYPE *pEdit)
 	}
 }
 
+/*
+ * Frame1 - Clear and redraw the filename input box with its current text.
+ */
 void Frame1(int x1, int y1, int x2, int y2, struct EDITTYPE *pEdit)
 {
 	setfillstyle(SOLID_FILL, LIGHTGREEN);

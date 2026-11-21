@@ -1,10 +1,9 @@
-/**********************************************
-function£ºget in a char or ENTER
-
-programmer:YanChao
-
-time£º2011.9.16-2011.9.18
-***********************************************/
+/*****************************************************************************
+ * File: LANGUAGE.C
+ * Function: Insert ASCII characters, insert newline (ENTER) nodes, and toggle
+ *           between English (ASCII) and Chinese (Pinyin) input modes.
+ * Programmer: YanChao (2011.9.16-2011.9.18)
+ *****************************************************************************/
 #include<stdlib.h>
 #include"h/struct.h"
 #include"h/node.h"
@@ -12,7 +11,13 @@ time£º2011.9.16-2011.9.18
 #include"h/malloc.h"
 #include"h/language.h"
 
-/********************Get char, number,etc***********************/
+/*
+ * GetEnglish - Insert the printable ASCII character in `pEdit->state.ascii`
+ *              at the current caret position (flag = 1).
+ *
+ * Safely handles empty documents, appending at tail, and inserting when
+ * `current == NULL` (before `pageFirst`). Triggers viewport and caret redraws.
+ */
 void GetEnglish(struct EDITTYPE *pEdit)
 {
 	char data[2]="h";
@@ -37,7 +42,12 @@ void GetEnglish(struct EDITTYPE *pEdit)
 	}
 }
 
-/******************get ENTER key***************************/
+/*
+ * GetEnter - Insert a newline node (flag = 0) at the current caret position.
+ *
+ * If the caret is already on the bottom visible row (EDITERSCREENY2), sets
+ * `pageDownFlag = 2` so the main loop scrolls the viewport down by one line.
+ */
 void GetEnter(struct EDITTYPE *pEdit)
 {
 	char data[2]="h";
@@ -68,7 +78,9 @@ void GetEnter(struct EDITTYPE *pEdit)
 	}
 }
 
-/*************Exchange Language*************/
+/*
+ * ExchangeLanguage - Toggle active input mode between English (0) and Chinese (1).
+ */
 void ExchangeLanguage(struct EDITTYPE *pEdit)
 {
 	if(pEdit->language==1)

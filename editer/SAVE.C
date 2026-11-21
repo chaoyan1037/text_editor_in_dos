@@ -1,10 +1,8 @@
-/**********************************************
-function:save file
-
-programmer:XiaoYao
-
-time：2011.10.10
-***********************************************/
+/*****************************************************************************
+ * File: SAVE.C
+ * Function: Save confirmation dialog and document serialization (Save/SaveAs).
+ * Programmer: XiaoYao (2011.10.10)
+ *****************************************************************************/
 
 #include<graphics.h>
 #include<string.h>
@@ -17,16 +15,23 @@ time：2011.10.10
 #include"h/hanzi.h"
 #include"h/save.h"
 
+/*
+ * Savewarning - Draw the generic "Save? OK (Y) / Cancel (N)" confirmation box.
+ * Caller sets `pEdit->state.functionActive` (2, 9, 11, or 12) to determine
+ * what happens after the user confirms or cancels.
+ */
 void Savewarning(struct EDITTYPE *pEdit)
 {
 	setfillstyle(SOLID_FILL, LIGHTGRAY);
 	bar(240, 160, 380, 240);
 	button3d(240, 160, 380, 240);
 
+	/* OK (Y) button frame */
 	setcolor(BLACK);
 	rectangle(240+6, 160+54, 380-74, 240-8);
 	WhiteBlack(240+6, 160+54, 380-74, 240-8, WHITE);
 
+	/* Cancel (N) button frame */
 	setcolor(BLACK);
 	rectangle(245+69, 160+54, 380-6, 240-8);
 	WhiteBlack(245+69, 160+54, 380-6, 240-8, WHITE);
@@ -39,15 +44,22 @@ void Savewarning(struct EDITTYPE *pEdit)
 	outtextxy(351, 230, "(N)");
 }
 
-
+/*
+ * Save - Serialize the document linked list to `filename` inside SAVE/.
+ *
+ * Tries "C://TC30//BIN//SAVE//" first, falling back to relative "SAVE/".
+ * Uses fputc() directly without mutating node contents, and writes '\n' for
+ * newline nodes (flag=0), 1 byte for ASCII (flag=1), and 2 bytes for Hanzi
+ * (flag=2).
+ */
 void Save(char *filename, struct EDITTYPE *pEdit)
 {
 	FILE *fp=NULL;
 	struct NODE *p;
 	char routine[64];
 
-	pEdit->editFlag=1;   /* 重新显示屏幕以覆盖对话框 */
-	pEdit->cursorFlag=1; /* 重新显示光标 */
+	pEdit->editFlag=1;   /* Redraw viewport to erase modal dialog */
+	pEdit->cursorFlag=1; /* Re-sync caret after redraw */
 
 	if(filename==NULL || filename[0]=='\0')
 	{
@@ -91,6 +103,10 @@ void Save(char *filename, struct EDITTYPE *pEdit)
 	fclose(fp);
 }
 
+/*
+ * Saveas - Save the document under the newly typed `pEdit->spell.name` and
+ *          update the active title-bar filename (`pEdit->file.fname`).
+ */
 void Saveas(struct EDITTYPE *pEdit)
 {
 	if(pEdit->spell.name[0]=='\0')

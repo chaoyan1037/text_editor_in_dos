@@ -1,10 +1,21 @@
-/**********************************************
-function：edit file..and control..
-
-promagromer:YanChao
-
-time：2011.9.10-2011.11.4
-***********************************************/
+/*****************************************************************************
+ * File: EDITER2.C
+ * Function: Program entry point, master event loop, state initialization,
+ *           and command / keyboard / modal-dialog dispatch tables.
+ * Programmer: YanChao (2011.9.10-2011.11.4)
+ *
+ * Event Loop Pipeline (one iteration):
+ *   1. Resolve deferred flags (`pageDownFlag`, `file.modifyFlag`).
+ *   2. Dispatch queued command `state.function` via SwitchFunction().
+ *   3. If no pull-down menu is active (`editActive == 0`), poll BIOS keyboard:
+ *        - In normal mode (`functionActive == 0`), map control/nav keys via
+ *          SwitchKey().
+ *        - Dispatch printable characters, Chinese IME, or modal Y/N/F/R/C
+ *          responses via FunctionActiveSwitch().
+ *      Otherwise delegate keys to Submenu().
+ *   4. Refresh UI in strict draw order:
+ *        ShowPosition -> MouseKey -> ViewAll -> ShowMouse -> DrawCursor -> RollBar.
+ *****************************************************************************/
 #include<graphics.h>
 #include<stdlib.h>
 #include<stdio.h>
@@ -32,13 +43,18 @@ void SwitchFunction(struct EDITTYPE *pEdit);
 void SwitchKey(struct EDITTYPE *pEdit);
 void FunctionActiveSwitch(struct EDITTYPE *pEdit);
 
+/*
+ * main - Initialize editor state and VGA graphics, then run the interactive
+ *        event loop until ExitEditer() terminates the process.
+ */
 int main(void)
 {
-	int inputFlag=0; /* 输入标志位，当有按键时置1 */
+	int inputFlag=0; /* Set to 1 during a loop pass when a BIOS key was read */
 	struct EDITTYPE edit;
 	InitStruct(&edit);
 	DrawMainMenu(&edit);
 
+	/* Display initial "NONAME.TXT" filename in the title bar */
 	setcolor(YELLOW);
 	outtextxy(5, 15, edit.file.fname);
 
@@ -47,7 +63,7 @@ int main(void)
 		setcolor(BLACK);
 		settextjustify(LEFT_TEXT, BOTTOM_TEXT);
 
-		/* 当光标在最下面一行时按下移键或enter时执行，使光标下移 */
+		/* After scrolling down at the bottom row, step the caret onto the new row */
 		if(edit.pageDownFlag==1 || edit.pageDownFlag==2)
 		{
 			edit.state.function=2;
@@ -55,6 +71,7 @@ int main(void)
 			edit.state.key=DOWN;
 		}
 
+		/* Promote deferred save-before-open (1) / save-before-new (2) dialogs */
 		if(edit.file.modifyFlag==1)
 		{
 			edit.state.functionActive=11;
@@ -66,83 +83,90 @@ int main(void)
 			edit.file.modifyFlag=0;
 		}
 
-		/* 根据不同的function值执行不同操作 */
+		/* Execute any command queued by keyboard or mouse in the previous pass */
 		if(edit.state.function!=0)
 		{
 			SwitchFunction(&edit);
 			edit.state.function=0;
 		}
 
-		if(edit.editActive==0) /* 编辑状态 */
+		if(edit.editActive==0) /* Normal editing or modal dialog state */
 		{
-			inputFlag=0; /* 输入标志位清0 */
+			inputFlag=0;
 			if( bioskey(1)!=0 )
 			{
 				long int i;
 				i=bioskey(0);
-				edit.state.key=i;           /* 取按键的扫描码 */
-				edit.state.ascii=(int)(i&0x00ff); /* 取按键的ASCII码 */
-				inputFlag=1;                /* 置标志位1 */
+				edit.state.key=i;                 /* Full scan code + ASCII */
+				edit.state.ascii=(int)(i&0x00ff); /* Low-byte ASCII value */
+				inputFlag=1;
 				if(edit.state.functionActive==0)
 				{
-					SwitchKey(&edit); /* 编辑状态下根据不同的key值执行不同操作 */
+					SwitchKey(&edit);
 				}
 			}
-			if(inputFlag) /* 有按键则进入 */
+			if(inputFlag)
 			{
-				/* 按键后根据不同的FunctionActive值执行不同操作 */
 				FunctionActiveSwitch(&edit);
 			}
 		}
-		else /* edit.editActive!=0，表示有菜单被选中 */
+		else /* Pull-down menu F1..F4 is open */
 		{
 			Submenu(&edit);
 		}
-		ShowPosition(&edit); /* 显示行列坐标 */
-		MouseKey(&edit);     /* 顺序不可随意改变 */
-		ViewAll(&edit);      /* 显示链表里的所有内容 */
-		ShowMouse(&edit);    /* 显示鼠标 */
-		DrawCursor(&edit);   /* 显示光标 */
-		RollBar(&edit);      /* 滚动条 */
+
+		/* UI update order is intentional to keep XOR cursor/mouse clean */
+		ShowPosition(&edit);
+		MouseKey(&edit);
+		ViewAll(&edit);
+		ShowMouse(&edit);
+		DrawCursor(&edit);
+		RollBar(&edit);
 	}
 
 	return 0;
 }
 
+/*
+ * InitStruct - Zero-initialize `pEdit`, configure default coordinates, menu
+ *              counts, and filename, and then probe the DOS mouse driver.
+ */
 void InitStruct(struct EDITTYPE *pEdit)
 {
 	memset(pEdit, 0, sizeof(struct EDITTYPE));
 
-	/****鼠标结构初始化***/
-	pEdit->state.x=320; /* 记录鼠标位置 */
+	/* Initial mouse position centered on the 640x480 screen */
+	pEdit->state.x=320;
 	pEdit->state.y=240;
 	pEdit->state.function=0;
 	pEdit->state.functionActive=0;
-	pEdit->state.mouseFlag=0; /* 重画编辑器窗后画鼠标标志位 */
+	pEdit->state.mouseFlag=0;
 
-	pEdit->start=NULL; /* 链表操作指针 */
+	/* Empty document, clipboard, and find-match lists */
+	pEdit->start=NULL;
 	pEdit->current=NULL;
 	pEdit->last=NULL;
 	pEdit->clipStart=NULL;
 	pEdit->clipLast=NULL;
 	pEdit->findStart=NULL;
 	pEdit->findLast=NULL;
-	pEdit->pageFirst=NULL; /* 当前显示页的第一个节点 */
+	pEdit->pageFirst=NULL;
 
-	pEdit->x=EDITERSCREENX1; /* 编辑处的位置 */
+	/* Caret starts at top-left of viewport; caches force initial draw */
+	pEdit->x=EDITERSCREENX1;
 	pEdit->y=EDITERSCREENY1+CHARHIGH;
-	pEdit->line=0;      /* 编辑处的行列坐标 */
+	pEdit->line=0;
 	pEdit->row=0;
-	pEdit->lineCount=0; /* 总行数 */
+	pEdit->lineCount=0;
 	pEdit->cursorFlag=0;
-	pEdit->editFlag=0;  /* 编辑标志位，为1则重画编辑框 */
-	pEdit->editActive=0;/* 编辑状态标志位，为0则为编辑状态 */
-	pEdit->copyActive=0;/* 复制标志位，为1则可执行复制操作 */
-	pEdit->copyCutFlag=0;/* 剪切/复制独立缓冲区标志位 */
-	pEdit->clipFlag=0;  /* 剪切板标志位，为0则为空 */
+	pEdit->editFlag=0;
+	pEdit->editActive=0;
+	pEdit->copyActive=0;
+	pEdit->copyCutFlag=0;
+	pEdit->clipFlag=0;
 	pEdit->spell.phz=NULL;
-	pEdit->language=0;  /* 语言标志位 */
-	pEdit->pageDownFlag=0; /* 光标下移换页的操作标志位 */
+	pEdit->language=0; /* Start in English (ASCII) input mode */
+	pEdit->pageDownFlag=0;
 	pEdit->tempLineCount=CHARINROW;
 	pEdit->tempCurrentCount=0;
 	pEdit->lastPosX=-1;
@@ -152,17 +176,19 @@ void InitStruct(struct EDITTYPE *pEdit)
 	strcpy(pEdit->file.fname, "NONAME.TXT");
 	pEdit->file.fileflag=0;
 
-	pEdit->submenu.menuflag=0; /* 菜单标志位，为0则重画子菜单 */
-	pEdit->submenu.flag=1;     /* 记录当前活跃菜单的活跃子菜单的行号 */
-	pEdit->submenu.SubmenuNum[0]=5; /* 各菜单含的子菜单数 */
+	/* Submenu item counts: File(5), Edit(4), Tools(2), Help(2) */
+	pEdit->submenu.menuflag=0;
+	pEdit->submenu.flag=1;
+	pEdit->submenu.SubmenuNum[0]=5;
 	pEdit->submenu.SubmenuNum[1]=4;
 	pEdit->submenu.SubmenuNum[2]=2;
 	pEdit->submenu.SubmenuNum[3]=2;
 
-	pEdit->spell.pcode[2]='\0'; /* 初始化字符串 */
+	pEdit->spell.pcode[2]='\0';
 	pEdit->findGoal[0]='\0';
 	pEdit->replaceGoal[0]='\0';
 
+	/* Verify DOS mouse driver is present after all fields are safely initialized */
 	if(!InitMouse())
 	{
 		printf("InitMouse failed...\n");
@@ -171,7 +197,18 @@ void InitStruct(struct EDITTYPE *pEdit)
 	}
 }
 
-/***********function switch-case************************************/
+/*
+ * SwitchFunction - Central command dispatcher keyed by `pEdit->state.function`.
+ *   1: Exit prompt      9: Save prompt      17: Execute Save
+ *   2: MoveCursor      10: Open filename    18: Open (prompt save if non-empty)
+ *   3: GetEnter        11: Execute New      19: Execute Open
+ *   4: Paste           12: CopySelection    20: Cancel Find
+ *   5: Find dialog     13: CopyCut          21: Find & Replace dialog
+ *   6: Open submenu    14: New (prompt)     22: Execute Replace
+ *   7: GetEnglish      15: Save As dialog   23: Cancel Replace
+ *   8: Toggle EN/ZH    16: Execute Find     24: Extend selection
+ *                                           25: Select All on page
+ */
 void SwitchFunction(struct EDITTYPE *pEdit)
 {
 	switch(pEdit->state.function)
@@ -190,13 +227,13 @@ void SwitchFunction(struct EDITTYPE *pEdit)
 			Paste(pEdit);
 			break;
 		case 5:
-			FindFunction(pEdit); /* step1 in find */
+			FindFunction(pEdit);
 			break;
 		case 6:
 			GetSubmenu(pEdit);
 			break;
 		case 7:
-			GetEnglish(pEdit); /* 包含各种可显示字符及空格 */
+			GetEnglish(pEdit);
 			break;
 		case 8:
 			ExchangeLanguage(pEdit);
@@ -250,7 +287,7 @@ void SwitchFunction(struct EDITTYPE *pEdit)
 			}
 			break;
 		case 16:
-			FingGoal(pEdit); /* step2 in both find and replace */
+			FingGoal(pEdit);
 			break;
 		case 17:
 			Save(pEdit->file.fname, pEdit);
@@ -273,10 +310,10 @@ void SwitchFunction(struct EDITTYPE *pEdit)
 			CancleFind(pEdit);
 			break;
 		case 21:
-			FindAndReplace(pEdit); /* step1 in replace */
+			FindAndReplace(pEdit);
 			break;
 		case 22:
-			ReplaceFunction(pEdit); /* step2 in replace */
+			ReplaceFunction(pEdit);
 			break;
 		case 23:
 			CancleReplace(pEdit);
@@ -285,14 +322,17 @@ void SwitchFunction(struct EDITTYPE *pEdit)
 			BlackWhiteChoosen(pEdit);
 			break;
 		case 25:
-			AllChosen(pEdit); /* choose all */
+			AllChosen(pEdit);
 			break;
 		default:
 			break;
 	}
 }
 
-/*************Getkey switch-case****************************/
+/*
+ * SwitchKey - Translate special/shortcut BIOS keys in normal editing mode
+ *             (`functionActive == 0`) into queued command IDs.
+ */
 void SwitchKey(struct EDITTYPE *pEdit)
 {
 	switch( pEdit->state.key )
@@ -330,11 +370,16 @@ void SwitchKey(struct EDITTYPE *pEdit)
 	}
 }
 
-/****************functionActive switch-case********************/
+/*
+ * FunctionActiveSwitch - Route printable text input (EN or ZH) when
+ *                        `functionActive == 0`, or handle keyboard responses
+ *                        (Y/N/F/R/C/Ctrl+C/Ctrl+X) for the active modal state.
+ */
 void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 {
 	if(pEdit->language==0 && pEdit->state.functionActive==0)
 	{
+		/* English mode: insert any printable ASCII character */
 		if( pEdit->state.ascii>=0x20 && pEdit->state.ascii<=0x7e )
 		{
 			pEdit->state.function=7;
@@ -342,6 +387,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 	}
 	else if(pEdit->language==1 && pEdit->state.functionActive==0)
 	{
+		/* Chinese mode: 'a'..'z' starts pinyin IME; symbols/digits insert as ASCII */
 		if( pEdit->state.ascii>=0x20 && pEdit->state.ascii<=0x7e )
 		{
 			if(pEdit->state.ascii>='a' && pEdit->state.ascii<='z')
@@ -354,14 +400,12 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			}
 		}
 	}
-	/* 一些操作后的按键确认 */
-	else if(pEdit->state.functionActive==1)
+	else if(pEdit->state.functionActive==1) /* Dismiss info/help alert on any key */
 	{
 		pEdit->editFlag=1;
 		pEdit->state.functionActive=0;
 	}
-	/* 退出前保存确认 */
-	else if(pEdit->state.functionActive==2)
+	else if(pEdit->state.functionActive==2) /* Save-before-Exit confirmation */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -375,7 +419,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			ExitEditer(pEdit);
 		}
 	}
-	else if(pEdit->state.functionActive==5 || pEdit->state.functionActive==6) /* find */
+	else if(pEdit->state.functionActive==5 || pEdit->state.functionActive==6) /* Find / Replace search */
 	{
 		if(pEdit->state.ascii=='f' || pEdit->state.ascii=='F')
 		{
@@ -385,15 +429,15 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 		{
 			if(pEdit->state.functionActive==5)
 			{
-				pEdit->state.function=20; /* cancel find in find */
+				pEdit->state.function=20; /* Cancel Find */
 			}
 			else
 			{
-				pEdit->state.function=23; /* cancel find in replace */
+				pEdit->state.function=23; /* Cancel Replace */
 			}
 		}
 	}
-	else if(pEdit->state.functionActive==7) /* choose to replace */
+	else if(pEdit->state.functionActive==7) /* Confirm replacement on found match */
 	{
 		if(pEdit->state.ascii=='r' || pEdit->state.ascii=='R')
 		{
@@ -404,7 +448,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->state.function=23;
 		}
 	}
-	else if(pEdit->state.functionActive==9) /* save */
+	else if(pEdit->state.functionActive==9) /* Save confirmation */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -417,7 +461,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->editFlag=1;
 		}
 	}
-	else if(pEdit->state.functionActive==10) /* open input */
+	else if(pEdit->state.functionActive==10) /* Open filename confirmation */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -430,7 +474,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->editFlag=1;
 		}
 	}
-	else if(pEdit->state.functionActive==11) /* open save */
+	else if(pEdit->state.functionActive==11) /* Save-before-Open confirmation */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -444,7 +488,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->state.functionActive=0;
 		}
 	}
-	else if(pEdit->state.functionActive==12) /* new save */
+	else if(pEdit->state.functionActive==12) /* Save-before-New confirmation */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{
@@ -459,7 +503,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 			pEdit->state.mouseFlag=0;
 		}
 	}
-	else if(pEdit->state.functionActive==13) /* black white chosen select all */
+	else if(pEdit->state.functionActive==13) /* Select-All action dispatch */
 	{
 		switch( pEdit->state.key )
 		{
@@ -471,6 +515,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 				pEdit->state.function=13;
 				break;
 			default:
+				/* Any other key cancels the selection highlight cleanly */
 				if(pEdit->copyCutFlag==0)
 				{
 					pEdit->clipStart=NULL;
@@ -481,7 +526,7 @@ void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 		}
 		pEdit->state.functionActive=0;
 	}
-	else if(pEdit->state.functionActive==15) /* save as */
+	else if(pEdit->state.functionActive==15) /* Save-As filename confirmation */
 	{
 		if( (pEdit->state.ascii=='Y')||(pEdit->state.ascii=='y') )
 		{

@@ -1,3 +1,7 @@
+/*****************************************************************************
+ * File: MALLOC.H
+ * Purpose: Checked heap allocator for document linked-list nodes.
+ *****************************************************************************/
 #ifndef _MALLOC_H_
 #define _MALLOC_H_
 

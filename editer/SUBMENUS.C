@@ -1,10 +1,9 @@
-/**********************************************
-function: draw submenu, and choose function...
-
-programmer:XiaoYao
-
-time：2011.10.5-2011.10.7
-***********************************************/
+/*****************************************************************************
+ * File: SUBMENUS.C
+ * Function: Pull-down submenu rendering (F1..F4), keyboard navigation within
+ *           open menus, command dispatch, and Help information popups.
+ * Programmer: XiaoYao (2011.10.5-2011.10.7)
+ *****************************************************************************/
 #include<graphics.h>
 #include<bios.h>
 #include"h/common.h"
@@ -22,6 +21,13 @@ void SubmenuF4(struct EDITTYPE *pEdit);
 void EnterFunction(struct EDITTYPE *pEdit);
 static void DrawSubmenuBox(int x1, int x2, char *items[], int count, struct EDITTYPE *pEdit);
 
+/*
+ * DrawSubmenuBox - Shared renderer for all four pull-down menus.
+ *
+ * Draws only when `submenu.menuflag == 0`, painting the yellow dropdown panel,
+ * the green beveled highlight bar for item `submenu.flag` (1-based), and all
+ * Chinese item labels spaced 30 pixels apart vertically.
+ */
 static void DrawSubmenuBox(int x1, int x2, char *items[], int count, struct EDITTYPE *pEdit)
 {
 	int i;
@@ -51,6 +57,7 @@ static void DrawSubmenuBox(int x1, int x2, char *items[], int count, struct EDIT
 	}
 }
 
+/* SubmenuF1 - File menu: Open, New, Save, Save As, Close */
 void SubmenuF1(struct EDITTYPE *pEdit)
 {
 	char *menu[5];
@@ -62,6 +69,7 @@ void SubmenuF1(struct EDITTYPE *pEdit)
 	DrawSubmenuBox(5, 85, menu, 5, pEdit);
 }
 
+/* SubmenuF2 - Edit menu: Cut, Copy, Paste, Select All */
 void SubmenuF2(struct EDITTYPE *pEdit)
 {
 	char *menu[4];
@@ -72,6 +80,7 @@ void SubmenuF2(struct EDITTYPE *pEdit)
 	DrawSubmenuBox(95, 175, menu, 4, pEdit);
 }
 
+/* SubmenuF3 - Tools menu: Find, Find & Replace */
 void SubmenuF3(struct EDITTYPE *pEdit)
 {
 	char *menu[2];
@@ -80,6 +89,7 @@ void SubmenuF3(struct EDITTYPE *pEdit)
 	DrawSubmenuBox(185, 265, menu, 2, pEdit);
 }
 
+/* SubmenuF4 - Help menu: Operation Guide, About */
 void SubmenuF4(struct EDITTYPE *pEdit)
 {
 	char *menu[2];
@@ -88,35 +98,35 @@ void SubmenuF4(struct EDITTYPE *pEdit)
 	DrawSubmenuBox(275, 355, menu, 2, pEdit);
 }
 
+/*
+ * GetSubmenu - Activate the pull-down menu corresponding to F1..F4.
+ * When triggered via mouse click, `state.key` is 0 so `editActive` set by
+ * ChooseSubmenu() is preserved untouched.
+ */
 void GetSubmenu(struct EDITTYPE *pEdit)
 {
-	pEdit->submenu.menuflag=0; /* 菜单标志位，为0则需画出菜单 */
+	pEdit->submenu.menuflag=0;
 	switch(pEdit->state.key)
 	{
-		case F1: pEdit->editActive=1;
-				 break;
-		case F2: pEdit->editActive=2;
-				 break;
-		case F3: pEdit->editActive=3;
-				 break;
-		case F4: pEdit->editActive=4;
-				 break;
+		case F1: pEdit->editActive=1; break;
+		case F2: pEdit->editActive=2; break;
+		case F3: pEdit->editActive=3; break;
+		case F4: pEdit->editActive=4; break;
 		default: break;
 	}
 }
 
+/*
+ * Submenu - Draw the active pull-down menu and process UP/DOWN/ENTER/ESC keys.
+ */
 void Submenu(struct EDITTYPE *pEdit)
 {
 	switch(pEdit->editActive)
 	{
-		case 1: SubmenuF1(pEdit);
-				break;
-		case 2: SubmenuF2(pEdit);
-				break;
-		case 3: SubmenuF3(pEdit);
-				break;
-		case 4: SubmenuF4(pEdit);
-				break;
+		case 1: SubmenuF1(pEdit); break;
+		case 2: SubmenuF2(pEdit); break;
+		case 3: SubmenuF3(pEdit); break;
+		case 4: SubmenuF4(pEdit); break;
 		default: break;
 	}
 	if(bioskey(1)!=0)
@@ -126,7 +136,7 @@ void Submenu(struct EDITTYPE *pEdit)
 		switch(pEdit->state.key)
 		{
 			case UP:
-				if(pEdit->submenu.flag>1) /* 子菜单中光条位置 */
+				if(pEdit->submenu.flag>1)
 				{
 					pEdit->submenu.flag--;
 					pEdit->submenu.menuflag=0;
@@ -152,44 +162,47 @@ void Submenu(struct EDITTYPE *pEdit)
 	}
 }
 
-/****************choose submenu then press ENTER...**********/
+/*
+ * EnterFunction - Map the highlighted `(editActive, submenu.flag)` item to
+ *                 its queued command ID (`state.function`) or Help popup.
+ */
 void EnterFunction(struct EDITTYPE *pEdit)
 {
 	switch(pEdit->editActive)
 	{
-		case 1:
+		case 1: /* File menu */
 			switch(pEdit->submenu.flag)
 			{
-				case 1: pEdit->state.function=10; break;
-				case 2: pEdit->state.function=14; break;
-				case 3: pEdit->state.function=9;  break;
-				case 4: pEdit->state.function=15; break;
-				case 5: pEdit->state.function=1;  break;
+				case 1: pEdit->state.function=10; break; /* Open */
+				case 2: pEdit->state.function=14; break; /* New */
+				case 3: pEdit->state.function=9;  break; /* Save */
+				case 4: pEdit->state.function=15; break; /* Save As */
+				case 5: pEdit->state.function=1;  break; /* Exit */
 				default: break;
 			}
 			ExitSubmenu(pEdit);
 			break;
-		case 2:
+		case 2: /* Edit menu */
 			switch(pEdit->submenu.flag)
 			{
-				case 1: pEdit->state.function=13; break;
-				case 2: pEdit->state.function=12; break;
-				case 3: pEdit->state.function=4;  break;
-				case 4: pEdit->state.function=25; break;
+				case 1: pEdit->state.function=13; break; /* Cut */
+				case 2: pEdit->state.function=12; break; /* Copy */
+				case 3: pEdit->state.function=4;  break; /* Paste */
+				case 4: pEdit->state.function=25; break; /* Select All */
 				default: break;
 			}
 			ExitSubmenu(pEdit);
 			break;
-		case 3:
+		case 3: /* Tools menu */
 			switch(pEdit->submenu.flag)
 			{
-				case 1: pEdit->state.function=5;  break;
-				case 2: pEdit->state.function=21; break;
+				case 1: pEdit->state.function=5;  break; /* Find */
+				case 2: pEdit->state.function=21; break; /* Find & Replace */
 				default: break;
 			}
 			ExitSubmenu(pEdit);
 			break;
-		case 4:
+		case 4: /* Help menu */
 			switch(pEdit->submenu.flag)
 			{
 				case 1:
@@ -208,6 +221,10 @@ void EnterFunction(struct EDITTYPE *pEdit)
 	}
 }
 
+/*
+ * ExitSubmenu - Close any open pull-down menu, repaint its top-bar button,
+ *               and request a viewport redraw to erase the dropdown overlay.
+ */
 void ExitSubmenu(struct EDITTYPE *pEdit)
 {
 	int temp=pEdit->editActive;
@@ -227,7 +244,10 @@ void ExitSubmenu(struct EDITTYPE *pEdit)
 	settextjustify(LEFT_TEXT, BOTTOM_TEXT);
 }
 
-/********** Operation Direction***************/
+/*
+ * OperationDirection - Display the usage tips popup box.
+ * Sets `functionActive = 1` so any subsequent key or click dismisses it.
+ */
 void OperationDirection(struct EDITTYPE *pEdit)
 {
 	int i;
@@ -252,7 +272,10 @@ void OperationDirection(struct EDITTYPE *pEdit)
 	pEdit->state.functionActive=1;
 }
 
-/************just for a test...*****************/
+/*
+ * Explanation - Display the author credits popup box (including custom '垚').
+ * Sets `functionActive = 1` so any subsequent key or click dismisses it.
+ */
 void Explanation(struct EDITTYPE *pEdit)
 {
 	int i;

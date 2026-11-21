@@ -1,3 +1,7 @@
+/*****************************************************************************
+ * File: SUBMENUS.H
+ * Purpose: Pull-down submenu rendering, keyboard navigation, and Help popups.
+ *****************************************************************************/
 #ifndef _SUBMENUS_H_
 #define _SUBMENUS_H_
 
