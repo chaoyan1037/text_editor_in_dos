@@ -20,63 +20,347 @@ This report documents every bug fix, optimization, refactoring, and documentatio
 
 ### 1.1 Memory Safety: Use-After-Free, Double-Free & Leaks
 
-| File | Function(s) | Original Bug | Fix |
-|---|---|---|---|
-| [editer/NODE.C](editer/NODE.C) | `FreeAllNode()` | Loop header `for(; pNode!=NULL; pNode=pTemp->next)` read `pTemp->next` **after** `free(pNode)` (use-after-free) and unconditionally called `ClearClip()` even when `clipStart..clipLast` pointed into the already-freed main list (double-free). | Saved `pNext = pNode->next` before `free(pNode)`. Only calls `ClearClip()` when `copyCutFlag == 1` (detached clipboard); otherwise clears `clipStart`/`clipLast`/`findStart`/`findLast` safely. |
-| [editer/NODE.C](editer/NODE.C) | `ClearClip()` | Used `pTemp = pNode` and freed `pNode` before checking `pTemp == pEdit->clipLast` or advancing `pNode = pNode->next` (use-after-free). | Saves `pNext = (pNode == pEdit->clipLast) ? NULL : pNode->next` before `free(pNode)` and resets `clipStart`, `clipLast`, `copyCutFlag`, `copyActive`, `clipFlag`. |
-| [editer/NODE.C](editer/NODE.C) | `CopySelection()` *(new)* | `Ctrl+C` originally kept `clipStart..clipLast` pointing directly into the live document list, causing **infinite self-paste loops** when pasting inside a selection and **use-after-free/double-free** if copied text was edited or deleted. | Deep-copies `clipStart..clipLast` into a detached heap-allocated list (`clipStart->last == NULL`, `clipLast->next == NULL`) and sets `copyCutFlag = 1`, `copyActive = 1`. |
-| [editer/NODE.C](editer/NODE.C) | `DeleteNode()` | Deleting a node referenced by `clipStart`, `clipLast`, `findStart`, or `findLast` left dangling pointers; deleting `pageFirst` or the last node on a scrolled page left `pageFirst`/`current` invalid. | Guards `pNode == NULL`, bridges `pPrev <-> pNext`, repairs `start`, `last`, `pageFirst` (backing up to the previous line's `firstInLine` if deleting the tail of a scrolled page), `current`, and nulls out invalidated live selection/find pointers before `free(pNode)`. |
-| [editer/FUNCKEY.C](editer/FUNCKEY.C) | `ReplaceFunction()` | When replacement text was shorter than the matched span, `DeleteNode()` was called while advancing through already-freed nodes; also hijacked `clipStart`/`clipLast`, leaking or clobbering the user's clipboard. | Switched Find/Replace to dedicated non-owning `findStart`/`findLast` fields in [h/STRUCT.H](h/STRUCT.H). Saves `pNext = pNode->next` before `DeleteNode()` in Phase 2b; handles equal, longer, shorter, and empty (`""`) replacements cleanly. |
-| [editer/EDITER2.C](editer/EDITER2.C) | `InitStruct()` | Called `InitMouse()` and exited on failure **before** initializing linked-list pointers (`start`, `clipStart`, `phz`), risking freeing uninitialized stack garbage. | Added `memset(pEdit, 0, sizeof(struct EDITTYPE))` at the very start of `InitStruct()` and moved the `InitMouse()` check to the end, exiting cleanly with `exit(1)`. |
-| [editer/FUNCKEY.C](editer/FUNCKEY.C), [editer/MALLOC.C](editer/MALLOC.C) | `ExitEditer()`, `MallocNode()` | `ExitEditer()` called `ClearClip()` after `FreeAllNode()` (double-free risk), leaked the `HZK16` file handle, and did not call `exit(0)`; `MallocNode()` exited with status `0` without closing `HZK16`. | `ExitEditer()` calls `FreeAllNode()`, `close_hz()`, and `exit(0)`; `MallocNode()` closes `HZK16` and exits with `exit(1)` on OOM. |
+#### 1. Use-After-Free & Double-Free in `FreeAllNode()` — [editer/NODE.C](editer/NODE.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  for( ; pNode!=NULL; pNode=pTemp->next) /* reads pTemp->next AFTER free() */
+  {
+      pTemp=pNode;
+      free(pNode);
+  }
+  ClearClip(pEdit); /* double-frees clipStart..clipLast if still in main list */
+  ```
+  - **Root Cause & Impact:** `pTemp` pointed to the same node as `pNode`, so the `for`-loop increment `pNode = pTemp->next` dereferenced freed heap memory on every single iteration. Furthermore, `ClearClip()` was called unconditionally even when `clipStart..clipLast` still pointed into the document list (e.g., after selecting or copying text), freeing those nodes a second time and corrupting the heap.
+- **How It Was Fixed:**
+  ```c
+  while(pNode!=NULL)
+  {
+      pTemp=pNode->next; /* save next pointer BEFORE freeing */
+      free(pNode);
+      pNode=pTemp;
+  }
+  if(pEdit->copyCutFlag==1)
+  {
+      ClearClip(pEdit); /* only free detached clipboard nodes */
+  }
+  else
+  {
+      pEdit->clipStart=NULL;
+      pEdit->clipLast=NULL;
+  }
+  ```
+  Also resets `start`, `last`, `current`, `pageFirst`, `findStart`, `findLast`, and `clipFlag` to `NULL`/`0`.
+
+#### 2. Use-After-Free in `ClearClip()` — [editer/NODE.C](editer/NODE.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  while(pNode!=NULL)
+  {
+      pTemp=pNode;
+      free(pNode);
+      pNode=NULL;
+      if(pTemp==pEdit->clipLast) break;
+      pNode=pTemp->next; /* reads pTemp->next AFTER free(pNode) */
+  }
+  ```
+  - **Root Cause & Impact:** Dereferenced `pTemp->next` immediately after `free(pNode)` for every node in a multi-character clipboard.
+- **How It Was Fixed:** Save `pNext = (pNode == pEdit->clipLast) ? NULL : pNode->next;` **before** calling `free(pNode)`, then advance `pNode = pNext;` and clear `clipStart`, `clipLast`, `copyCutFlag`, `copyActive`, and `clipFlag`.
+
+#### 3. Use-After-Free & Dangling Pointers in `DeleteNode()` — [editer/NODE.C](editer/NODE.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  if(pNode->last==NULL)
+  {
+      pEdit->start=pNode->next;
+      pEdit->start->last=NULL; /* NULL dereference if deleting the only node! */
+      ...
+  }
+  else
+  {
+      pNode->next->last=pNode->last;
+      pNode->last->next=pNode->next;
+      free(pNode);
+      pNode=NULL;
+      pEdit->current=pNodeTemp->last; /* USE-AFTER-FREE: pNodeTemp == pNode! */
+  }
+  ```
+  - **Root Cause & Impact:** Three separate crash bugs in one function:
+    1. Deleting an interior node freed `pNode` and then read `pNodeTemp->last` from the just-freed block.
+    2. Deleting the sole remaining node in the document set `pEdit->start = NULL` and immediately dereferenced `pEdit->start->last = NULL`.
+    3. Deleting a node referenced by `pageFirst`, `clipStart`, `clipLast`, `findStart`, or `findLast` left dangling pointers across the editor.
+- **How It Was Fixed:**
+  1. Guard `if(pNode == NULL) return;` and cache `pPrev = pNode->last; pNext = pNode->next;` up front before mutating or freeing anything.
+  2. Bridge `pPrev <-> pNext` safely with NULL checks for `start` and `last`.
+  3. If `pNode == pEdit->pageFirst`, advance `pageFirst` to `pNext` (marking `firstInLine = 1`), or walk back from `pPrev` to the preceding line's `firstInLine` if deleting the tail of a scrolled page, or set `NULL` if empty.
+  4. Null out `clipStart`/`clipLast` (when `copyCutFlag == 0`) and `findStart`/`findLast` if they matched `pNode`, update `current` using cached `pPrev`, and only then call `free(pNode)`.
+
+#### 4. Live-Document Clipboard Aliasing (`Ctrl+C`) -> Detached Deep Copy — [editer/NODE.C](editer/NODE.C), [editer/EDITER2.C](editer/EDITER2.C)
+- **Original Bug (`64a59d0`):** Pressing `Ctrl+C` merely set `copyActive = 1` while leaving `clipStart..clipLast` pointing directly into the live document linked list.
+  - **Root Cause & Impact:**
+    - Pasting (`Ctrl+V`) while the caret sat inside or next to the copied range inserted new nodes between `clipStart` and `clipLast`, causing an **infinite self-paste loop** until OOM.
+    - Editing or deleting the copied text silently mutated or freed the clipboard, causing **use-after-free** on subsequent `Paste()`.
+- **How It Was Fixed:** Implemented `CopySelection()` in [editer/NODE.C](editer/NODE.C) and wired `SwitchFunction()` case `12` (`Ctrl+C`) to it. `CopySelection()` allocates a detached deep copy of every node in `[clipStart..clipLast]` with `newStart->last = NULL` and `newLast->next = NULL`, sets `copyCutFlag = 1` and `copyActive = 1`, and establishes a strict ownership invariant (`copyCutFlag == 0` = live non-owning selection; `copyCutFlag == 1` = detached heap-owned clipboard).
+
+#### 5. Use-After-Free & Clipboard Clobbering in `ReplaceFunction()` — [editer/FUNCKEY.C](editer/FUNCKEY.C), [h/STRUCT.H](h/STRUCT.H)
+- **Original Bug (`64a59d0`):**
+  ```c
+  while(pNode!=pEdit->clipLast)
+  {
+      DeleteNode(pNode, pEdit); /* frees pNode */
+      pNode=pNode->next;        /* USE-AFTER-FREE! */
+  }
+  ...
+  pEdit->clipLast=NULL;         /* clobbers/leaks user's clipboard! */
+  pEdit->clipStart=NULL;
+  ```
+  - **Root Cause & Impact:**
+    1. Replacing a matched word with a shorter or empty string freed `pNode` via `DeleteNode()` and immediately read `pNode->next` from freed memory.
+    2. `Find()` and `ReplaceFunction()` reused `clipStart`/`clipLast`, overwriting or leaking the user's detached clipboard whenever Find/Replace ran.
+- **How It Was Fixed:**
+  - Added dedicated non-owning `findStart` / `findLast` fields to `struct EDITTYPE` in [h/STRUCT.H](h/STRUCT.H).
+  - Rewrote `ReplaceFunction()` in two explicit phases:
+    - **Phase 1:** Overwrite existing matched nodes in-place for the shared prefix.
+    - **Phase 2a:** If replacement is longer, append remaining characters via `GetEnglish()`.
+    - **Phase 2b:** If replacement is shorter/empty, save `pNext = pNode->next` and `isLast = (pNode == pEnd)` **before** calling `DeleteNode(pNode, pEdit)`.
+
+#### 6. Uninitialized Struct Free on `InitMouse()` Failure — [editer/EDITER2.C](editer/EDITER2.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  if(!InitMouse())
+  {
+      closegraph();
+      printf("InitMouse failed...\n");
+      getch();
+      ExitEditer(pEdit); /* calls FreeAllNode() BEFORE start/clipStart are set to NULL! */
+  }
+  pEdit->start=NULL;
+  ```
+  - **Root Cause & Impact:** `struct EDITTYPE edit` is stack-allocated in `main()`. If DOS mouse detection failed, `ExitEditer()` called `FreeAllNode()` on random uninitialized stack garbage pointers (instant crash/heap corruption) and called `closegraph()` before `initgraph()` had even run.
+- **How It Was Fixed:** Added `memset(pEdit, 0, sizeof(struct EDITTYPE))` as the first line of `InitStruct()`, initialized all struct fields first, moved the `InitMouse()` check to the end of `InitStruct()`, and terminated cleanly with `exit(1)` without calling `closegraph()` or `ExitEditer()`.
+
+#### 7. Shutdown Double-Free, Handle Leak & Missing Exit — [editer/FUNCKEY.C](editer/FUNCKEY.C), [editer/MALLOC.C](editer/MALLOC.C)
+- **Original Bug (`64a59d0`):** `ExitEditer()` called `FreeAllNode()` followed by `ClearClip()`, never closed `pEdit->spell.phz` (`HZK16`), and returned to `main()`'s infinite `while(1)` loop instead of exiting; `MallocNode()` called `exit(0)` on OOM without closing `HZK16`.
+- **How It Was Fixed:** `ExitEditer()` calls `closegraph()`, `FreeAllNode(pEdit)`, `close_hz(pEdit)`, and `exit(0)`. `MallocNode()` calls `close_hz(pEdit)` and `exit(1)` on allocation failure.
 
 ---
 
 ### 1.2 NULL Dereferences, Crashes & Infinite Loops
 
-| File | Function(s) | Original Bug | Fix |
-|---|---|---|---|
-| [editer/LANGUAGE.C](editer/LANGUAGE.C), [editer/SPELL.C](editer/SPELL.C) | `GetEnglish()`, `GetEnter()`, `Gethanzi()` | Checked `(pEdit->start != NULL) && (pEdit->current->next == NULL)` — crashed with a **NULL dereference** whenever typing or pressing Enter at the top-left of a non-empty page (`current == NULL`). | Changed guard to `pEdit->current != NULL && pEdit->current->next == NULL` so `current == NULL` safely routes to `InsertNode()`. |
-| [editer/NODE.C](editer/NODE.C) | `AddNode()`, `InsertNode()` | `AddNode()` unconditionally dereferenced `pEdit->current->next`; `InsertNode()` dereferenced `pEdit->current->next->last` (crashing at tail) and `pEdit->pageFirst->last` (crashing on empty doc) and broke links when inserting before `pageFirst` on a scrolled page. | Added full empty-list, head, scrolled-`pageFirst`, interior, and tail handling with `data[2] = '\0'` termination in both functions. |
-| [editer/FUNCKEY.C](editer/FUNCKEY.C) | `Paste()` | Pasting into an empty document (`start == NULL`) left `pEdit->start == NULL` while setting `current`/`pageFirst`/`last` to the new node (corrupting the list head), and crashed on `current->next` when `current == NULL`. | Explicitly initializes `start = pageFirst = last = current = p` with `firstInLine = 1` when `start == NULL`, guards `copyActive == 1 && copyCutFlag == 1 && clipStart != NULL`, and safely handles `current == NULL`. |
-| [editer/FUNCKEY.C](editer/FUNCKEY.C) | `CopyCut()` | Assumed `clipStart == pageFirst` implied `pageFirst->next != NULL` (crashing when cutting the entire document), broke `start`/`pageFirst` when cutting a span crossing `pageFirst`, and allowed repeated `Ctrl+X` to corrupt an already-detached clipboard. | Guards `copyCutFlag == 0`, scans whether `pageFirst` lies inside `clipStart..clipLast`, stitches `pPrev <-> pNext`, repairs `start`, `last`, `pageFirst`, and `current`, and severs outer links (`clipStart->last = NULL`, `clipLast->next = NULL`). |
-| [editer/FUNCKEY.C](editer/FUNCKEY.C) | `AllChosen()` | Dereferenced `pageFirst` when document was empty (`pageFirst == NULL`), leaked any previous detached clipboard, and miscounted Hanzi widths (`flag == 2`) causing `count == CHARINLINE` to miss wraps. | Early-returns on `pageFirst == NULL`, frees any existing detached clip via `ClearClip()`, counts visual width with `count >= CHARINLINE`, and guards `current == NULL` inside the highlight loop. |
-| [editer/FUNCKEY.C](editer/FUNCKEY.C) | `MoveCursor()` | Scrolling `UP` at row 1 dereferenced `pEdit->pageFirst->last` without checking `pageFirst != NULL`; scrolling `DOWN` at row 25 did not guard `pageFirst != NULL`. | Added `pEdit->pageFirst != NULL && pEdit->pageFirst->last != NULL` guards before traversing backward/forward. |
-| [editer/DRAWMENU.C](editer/DRAWMENU.C) | `LocateRow()` | Checked `pNode->firstInLine` before checking `pNode != NULL`, risking a NULL dereference if `firstInLine` metadata was cleared. | Changed loop condition to `pNode != NULL && pNode->firstInLine == 0` with safe fallback `*pRow = 1`. |
-| [editer/HANZI.C](editer/HANZI.C) | `Get_hz()`, `Displayhz()`, `Printfhz()` | Did not check `phz == NULL` or `s == NULL`, and `Printfhz()` only checked `*s != '\0'` (could read past NUL on odd-length strings). | Added NULL guards, lazy `open_hz()` retry, `memset(bytes, 0, 32)` on read error, and `s[0] != '\0' && s[1] != '\0'` termination. |
+#### 8. NULL Dereference When Typing at Top-Left of Page (`current == NULL`) — [editer/LANGUAGE.C](editer/LANGUAGE.C), [editer/SPELL.C](editer/SPELL.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  /* In GetEnglish(), GetEnter(), and Gethanzi() */
+  else if( (pEdit->start!=NULL) && (pEdit->current->next==NULL) )
+  ```
+  - **Root Cause & Impact:** By editor convention, placing the caret at column 1 of row 1 sets `pEdit->current = NULL` (meaning "before `pageFirst`"). Whenever the document was non-empty (`start != NULL`) and the user moved left to top-left and typed any ASCII char, Enter, or Hanzi, `pEdit->current->next` dereferenced `NULL`.
+- **How It Was Fixed:** Changed the branch condition in all three functions (`GetEnglish()`, `GetEnter()`, `Gethanzi()`) to:
+  ```c
+  else if( pEdit->current!=NULL && pEdit->current->next==NULL )
+  ```
+  so `current == NULL` falls through cleanly to `InsertNode()`.
+
+#### 9. NULL Dereferences & Broken Scrolled Links in `AddNode()` / `InsertNode()` — [editer/NODE.C](editer/NODE.C)
+- **Original Bug (`64a59d0`):**
+  - `AddNode()` unconditionally executed `pEdit->current->next = pNode` (crashed when `current == NULL` or list empty) and overwrote `pEdit->last = pNode` even when inserting in the middle.
+  - `InsertNode()` executed `pEdit->current->next->last = pNode` without checking `current->next != NULL`, executed `pEdit->pageFirst->last = pNode` without checking `pageFirst != NULL`, and when `start != pageFirst` (scrolled down) overwrote `pNode->last = NULL`, **severing all off-screen lines above `pageFirst`** and leaking them.
+- **How It Was Fixed:** Handled all list positions cleanly in both functions: empty list (`start == NULL`), insertion before `pageFirst` (preserving `pPrev = pageFirst->last` and bridging `pPrev->next = pNode` when scrolled!), interior insertion, and tail insertion, plus guaranteed `pNode->data[2] = '\0'`.
+
+#### 10. Infinite Loop & Corrupt Head in `Paste()` — [editer/FUNCKEY.C](editer/FUNCKEY.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  if(pEdit->current==NULL)
+  {
+      struct NODE *p=MallocNode(pEdit);
+      *p=*(pEdit->clipStart); /* copies raw next/last pointers from clipboard! */
+      pEdit->current=pEdit->pageFirst=pEdit->last=p; /* start stays NULL, pNode never advances! */
+  }
+  ```
+  - **Root Cause & Impact:** Pasting into an empty document:
+    1. Copied raw `next`/`last` pointers from the clipboard node into the new document node (aliasing the clipboard into the document).
+    2. Never set `pEdit->start = p` (leaving `start == NULL`).
+    3. Never checked `pNode == clipLast` or advanced `pNode = pNode->next` — on a 1-char clipboard or empty doc, `pNode` stayed stuck on `clipStart` (duplicating the first char or looping forever).
+- **How It Was Fixed:** Require `copyActive == 1 && copyCutFlag == 1 && clipStart != NULL`. When `start == NULL`, copy only `data[0..2]` and `flag`, set `firstInLine = 1`, and initialize `start = pageFirst = last = current = p`. Unify loop termination (`if(pNode == pEdit->clipLast) break; pNode = pNode->next;`) at the bottom of the loop for every branch.
+
+#### 11. NULL Dereference & Broken `pageFirst` in `CopyCut()` — [editer/FUNCKEY.C](editer/FUNCKEY.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  if(pEdit->clipStart==pEdit->pageFirst)
+  {
+      pEdit->pageFirst=pEdit->clipLast->next;
+      pEdit->pageFirst->last=NULL; /* NULL dereference when cutting to end of doc! */
+      pEdit->current=NULL;
+      if(pEdit->pageFirst==NULL)   /* check comes TOO LATE! */
+      {
+          pEdit->last=pEdit->current=NULL;
+      }
+  }
+  ```
+  - **Root Cause & Impact:** Cutting from `pageFirst` through the end of the document set `pageFirst = NULL` and immediately dereferenced `pageFirst->last = NULL`. Additionally, `start` was never updated when cutting from the beginning, cutting a span that crossed `pageFirst` left `pageFirst` pointing into the detached clipboard, and pressing `Ctrl+X` twice re-cut an already-detached clipboard.
+- **How It Was Fixed:** Guard `copyCutFlag == 0`, scan `[clipStart..clipLast]` to detect `pageFirstCut`, stitch `pPrev <-> pNext` with NULL checks, repair `start`, `last`, `pageFirst`, and `current`, sever outer links on the detached clip (`clipStart->last = NULL`, `clipLast->next = NULL`), and set `copyCutFlag = 1`.
+
+#### 12. NULL Dereference & Hanzi Width Miscalculation in `AllChosen()` — [editer/FUNCKEY.C](editer/FUNCKEY.C)
+- **Original Bug (`64a59d0`):** Did not check `pEdit->pageFirst == NULL` (crashing on `Ctrl+A` in an empty document), did not free any prior detached clipboard (`ClearClip()`), and tested `count == CHARINLINE` instead of `>=` while incrementing by `1` per node (missing line wraps when double-width `flag == 2` Hanzi appeared on the last row).
+- **How It Was Fixed:** Return immediately if `pageFirst == NULL`, call `ClearClip()` if `copyCutFlag == 1`, accumulate visual columns via `count += (pNode->flag == 0) ? 1 : pNode->flag` with `count >= CHARINLINE`, and guard `pEdit->current == NULL` inside the highlight loop.
+
+#### 13. NULL Dereferences in `MoveCursor()` & `LocateRow()` — [editer/FUNCKEY.C](editer/FUNCKEY.C), [editer/DRAWMENU.C](editer/DRAWMENU.C)
+- **Original Bug (`64a59d0`):**
+  - `MoveCursor()` on `UP` at row 1 executed `struct NODE *pNode = pEdit->pageFirst->last;` without checking `pageFirst != NULL` (crashing on empty doc), and `DOWN` at row 25 did not guard `pageFirst != NULL`.
+  - `LocateRow()` evaluated `pNode->firstInLine == 0` before checking `pNode != NULL`.
+- **How It Was Fixed:** Added explicit `pEdit->pageFirst != NULL && pEdit->pageFirst->last != NULL` guards in `MoveCursor()` and changed `LocateRow()` to `for( ; pNode != NULL && pNode->firstInLine == 0; pNode = pNode->last)` with safe `*pRow = 1` fallback.
+
+#### 14. NULL Dereferences & Odd-Length Overread in `HANZI.C` — [editer/HANZI.C](editer/HANZI.C)
+- **Original Bug (`64a59d0`):** `Get_hz()` passed `pEdit->spell.phz` directly to `fseek()`/`fread()` even if `HZK16` failed to open (`NULL`); `Printfhz()` only checked `*s != '\0'` and stepped `s += 2`, reading past the NUL terminator on odd-length strings.
+- **How It Was Fixed:** Added `phz == NULL` guards and lazy `open_hz()` retry, zeroed `bytes[32]` on short read, guarded `s == NULL`, and changed `Printfhz()`'s loop condition to `(s[0] != '\0') && (s[1] != '\0')`.
 
 ---
 
 ### 1.3 Buffer Overflows, Integer Overflow & Bounds Bugs
 
-| File | Function(s) | Original Bug | Fix |
-|---|---|---|---|
-| [h/STRUCT.H](h/STRUCT.H), [editer/INNAME.C](editer/INNAME.C) | `struct SPELLTYPE`, `struct FILETYPE`, `InName()` | `spell.name` was only `char name[10]`, yet `InName()` allowed up to `12` characters (**buffer overflow**). `file.fname` was a `char *` aliased directly to `spell.name`, so opening/saving another file silently corrupted the active filename. | Expanded both to dedicated fixed buffers (`char name[16]`, `char fname[16]`), enforced `i < 12` before writing, fixed off-by-one `BACKSPACE`, and added `ESC` cancel handling. |
-| [editer/SPELL.C](editer/SPELL.C) | `InputPinYin()`, `OutputHanZi()`, `GetCode()` | `GetCode()` read dictionary bytes into a stack buffer with **no length limit** (overflowing on large pinyin files). `OutputHanZi()` used raw pointer arithmetic (`s -= 8`, `s += 8`) that could underflow before `code[]`, read past the end on partial last pages, and crashed when pressing `'1'..'4'` on an empty slot; also had no `ESC` cancel. | Passed explicit `maxLen` to `GetCode()` (`i < maxLen - 1`), added `ESC` cancel in both `InputPinYin()` and `OutputHanZi()`, replaced raw pointer math with bounds-checked integer page/slot indexing (`idx = page * 4 + choice`), and preserved the special `'垚'` glyph on `yao` page 8 slot 3. |
-| [editer/HANZI.C](editer/HANZI.C) | `Get_hz()` | Computed `qh = incode[0] - 0xa0` and `offset = (94*(qh-1)+(wh-1))*32l` using signed `char` / unvalidated bytes; any byte `< 0xa1` underflowed `unsigned char` and sought to an invalid file offset. | Cast to `unsigned char`, validated `b0 >= 0xa1 && b1 >= 0xa1`, and used `unsigned long` arithmetic `(94UL*(b0-0xa1) + (b1-0xa1)) * 32UL`. |
-| [editer/DRAWMENU.C](editer/DRAWMENU.C) | `RollBar()` | Thumb size and offset math could overflow 16-bit `int` on Turbo C or divide by zero when `totalLines == CHARINROW`, and the thumb could paint outside the track over the up/down arrow buttons. | Promoted ratio calculations to 32-bit `long`, guarded `maxScroll > 0`, and clamped `thumbHeight` to `[14, trackHeight]` and `thumbY` to `[trackTop, trackBottom - thumbHeight]`. |
-| [editer/FUNCKEY.C](editer/FUNCKEY.C) | `FindFunction()`, `FindAndReplace()` | Missing `ESC` cancellation (trapped user until `ENTER`), stale previous `findGoal`/`replaceGoal` buffers, and `BACKSPACE` off-by-one clearing. | Zeroed buffers on entry, added `ESC` -> `CancleFind()`/`CancleReplace()`, and fixed `i--` / `j--` before NUL termination. |
+#### 15. Filename Buffer Overflow & Pointer Aliasing — [h/STRUCT.H](h/STRUCT.H), [editer/INNAME.C](editer/INNAME.C)
+- **Original Bug (`64a59d0`):**
+  - `struct SPELLTYPE` declared `char name[10];`, yet `InName()` allowed `i < 12` and wrote `pEdit->spell.name[i + 1] = '\0'` — writing up to **3 bytes past the end of `name[10]`** directly into `pcode[]` and adjacent struct fields!
+  - `struct FILETYPE` declared `char *fname;`, initialized to string literal `"NONAME.TXT"` and later aliased via `pEdit->file.fname = pEdit->spell.name`. Opening or prompting another filename silently overwrote the active document's filename.
+  - `InName()` had no `ESC` cancel handling and broke out of the loop as soon as `i >= 12` without letting the user backspace.
+- **How It Was Fixed:** Expanded both to dedicated fixed arrays (`char name[16]`, `char fname[16]`), enforced `i < 12` before writing, fixed `BACKSPACE` to decrement `i` before setting `name[i] = '\0'`, added `ESC` cancel (setting `name[0] = '\0'`), and copied filenames with `strcpy`/`strncpy`.
+
+#### 16. Stack Buffer Overflow, Pointer Underflow & Guaranteed NULL Crash in Pinyin IME — [editer/SPELL.C](editer/SPELL.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  /* 1. GetCode(): unbounded read into caller's stack buffer */
+  while( (tcode[i] = fgetc(fp)) != EOF ) { i++; }
+
+  /* 2. OutputHanZi(): writes past end of code[] on partial last page */
+  while(i<4) { s+=2; *s=0; i++; }
+
+  /* 3. OutputHanZi(): sets s=NULL and IMMEDIATELY dereferences s[0]! */
+  if(*s=='\0') { s=NULL; }
+  pEdit->spell.pcode[0]=s[0];
+  pEdit->spell.pcode[1]=s[1];
+  ```
+  - **Root Cause & Impact:**
+    1. `GetCode()` could overflow `code[300]` on large pinyin dictionaries and stored `fgetc()`'s `int` return into a `char` before comparing against `EOF`.
+    2. Pagination (`=` / `-`) mutated raw pointer `s` with `s += 2` and `s -= 16`, corrupting memory past `code[]` on partial last pages and crashing whenever the user pressed `'1'..'4'` on an empty slot (it literally assigned `s = NULL` and read `s[0]` on the next line!).
+    3. Neither `InputPinYin()` nor `OutputHanZi()` supported `ESC` cancellation.
+- **How It Was Fixed:**
+  - Passed explicit `maxLen` to `GetCode()` (`int ch; while(i < maxLen - 1 && (ch = fgetc(fp)) != EOF)`), validated inputs, and added relative `spell/<pin>.txt` fallback.
+  - Replaced all raw pointer arithmetic in `OutputHanZi()` with bounds-checked integer page/slot indexing (`totalChars = len / 2`, `idx = page * 4 + choice`, only committing when `idx < totalChars` or on the special `yao` page 8 slot 3 `'垚'` glyph).
+  - Added `ESC` cancel to both `InputPinYin()` (returning `0` to abort cleanly) and `OutputHanZi()`.
+
+#### 17. Signed `char` Underflow in GB2312 `HZK16` Offset Math — [editer/HANZI.C](editer/HANZI.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  qh = incode[0] - 0xa0;
+  wh = incode[1] - 0xa0;
+  offset = (94*(qh-1)+(wh-1))*32l;
+  ```
+  - **Root Cause & Impact:** Any byte `< 0xa1` underflowed `unsigned char` (`qh - 1` became `255`), computing a bogus negative/out-of-range offset for `fseek()`, and `94 * (qh - 1)` was evaluated in 16-bit `int` before multiplying by `32l` on Turbo C.
+- **How It Was Fixed:** Cast both bytes to `unsigned char`, validate `if(b0 < 0xa1 || b1 < 0xa1) return;`, and compute `offset = (94UL * (unsigned long)(b0 - 0xa1) + (unsigned long)(b1 - 0xa1)) * 32UL;`.
+
+#### 18. Divide-by-Zero & 16-Bit Overflow in `RollBar()` — [editer/DRAWMENU.C](editer/DRAWMENU.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  if(y>=EDITERSCREENY2-76)
+  {
+      static i=0;
+      y=EDITERSCREENY2-76+(i/pEdit->tempLineCount); /* DIVIDE BY ZERO when tempLineCount==0! */
+      height=height-(i/pEdit->tempLineCount);
+      if(height>=10) i++;
+  }
+  ```
+  - **Root Cause & Impact:** Divided by `pEdit->tempLineCount` without guarding `!= 0`, used a monotonically growing `static i` that never reset on New/Open, and allowed the thumb to drift over the scrollbar arrows.
+- **How It Was Fixed:** Replaced with true proportional thumb geometry using 32-bit `long` arithmetic (`thumbHeight = trackHeight * CHARINROW / totalLines`, `thumbY = trackTop + linesBefore * (trackHeight - thumbHeight) / maxScroll`), guarding `maxScroll > 0` and clamping both `thumbHeight` (`[14, trackHeight]`) and `thumbY` (`[trackTop, trackBottom - thumbHeight]`).
+
+#### 19. Trapped Dialog Loops & Backspace Off-by-One in Find/Replace — [editer/FUNCKEY.C](editer/FUNCKEY.C)
+- **Original Bug (`64a59d0`):** `FindFunction()` and `FindAndReplace()` did not handle `ESC` (trapping the user in the modal loop until pressing `ENTER`), did not clear previous `findGoal`/`replaceGoal` strings on open, and cleared `findGoal[i-1]` before decrementing `i` cleanly.
+- **How It Was Fixed:** Reset buffers on entry, added `key == ESC` -> `CancleFind()`/`CancleReplace()` + `break`, and standardized `i--` / `j--` before NUL termination.
 
 ---
 
 ### 1.4 File I/O Bugs
 
-| File | Function(s) | Original Bug | Fix |
-|---|---|---|---|
-| [editer/SAVE.C](editer/SAVE.C) | `Save()`, `Saveas()` | Did not check `fopen() == NULL` (crashing if directory missing). Inside the write loop, `if(p->data[0] == 0) { ... fclose(fp); }` **closed `fp` mid-loop** and kept writing to a closed `FILE*`! `Saveas()` aliased `file.fname = spell.name`. | Added `filename` & `fp == NULL` checks, relative `SAVE/` fallback if `C://TC30//BIN//SAVE//` fails, clean `flag == 0 / 1 / 2` serialization (`fputc`), and `strncpy` into `file.fname`. |
-| [editer/OPEN.C](editer/OPEN.C) | `Open()`, `New()` | Used the classic `while(feof(fp) == 0)` anti-pattern (processing an extra garbage `EOF` byte at end of file), failed to handle `\r` (CRLF) or `\t` (tabs mis-synced GB2312 pairs), did not set `functionActive = 1` on invalid-filename alert, and aliased `file.fname = spell.name`. | Replaced with `while((r = fgetc(fp)) != EOF)`, skipped `\r`, expanded `\t` to 4 spaces, checked `r2 != EOF` for GB2312 pairs, copied filename into `file.fname`, added `SAVE/` fallback, and invalidated scrollbar/status caches in `New()`. |
-| [editer/HANZI.C](editer/HANZI.C) | `open_hz()`, `close_hz()` | Reopened `HZK16` repeatedly or leaked the file handle; only checked hardcoded `C://TC30//BIN//hanziku//HZK16`. | Kept a single persistent `FILE *phz` with relative `hanziku/HZK16` fallback and clean shutdown via `close_hz()`. |
+#### 20. Mid-Loop `fclose(fp)` Infinite Loop & Missing `fopen` Guard in `Save()` — [editer/SAVE.C](editer/SAVE.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  fp=fopen(routine,"wt"); /* NO NULL check! */
+  while(p!=NULL)
+  {
+      if(p->data[0]==0)
+      {
+          fprintf(fp,"%c",p->data[0]);
+          fclose(fp); /* closes fp mid-loop AND does not advance p=p->next -> INFINITE LOOP! */
+      }
+      else
+      {
+          if(p->flag==0) { p->data[0]=10; fprintf(fp,"%c",p->data[0]); }
+          ...
+          p=p->next;
+      }
+  }
+  fclose(fp);
+  ```
+  - **Root Cause & Impact:**
+    1. If `C://TC30//BIN//SAVE//` did not exist, `fp` was `NULL` and `fprintf(NULL, ...)` crashed immediately.
+    2. If any node had `data[0] == 0`, the `if` branch closed `fp` and **never executed `p = p->next`**, creating an infinite loop writing to a closed `FILE*`!
+    3. `flag == 0` mutated `p->data[0] = 10` in-place during save.
+- **How It Was Fixed:** Validate `filename`, try `C://TC30//BIN//SAVE//` then fall back to relative `SAVE/`, return cleanly if `fp == NULL`, serialize with `fputc('\n', fp)` (`flag == 0`), `fputc(data[0], fp)` (`flag == 1`), and two `fputc` calls (`flag == 2`), always advancing `p = p->next`, and call `fclose(fp)` once at the end.
+
+#### 21. `while(feof(fp) == 0)` Extra-Byte Bug & Missing `\r`/`\t` Handling in `Open()` — [editer/OPEN.C](editer/OPEN.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  while(feof(fp)==0)
+  {
+      r=fgetc(fp); /* returns EOF (-1) on final iteration! */
+      if((r>=0x20)&&(r<=0x7e)) ...
+      else if(r==10) ...
+      else { pEdit->spell.pcode[0]=r; r=fgetc(fp); ... } /* misparses \r, \t, and EOF as Hanzi! */
+  }
+  pEdit->file.fname=pEdit->spell.name; /* aliases shared input buffer! */
+  ```
+  - **Root Cause & Impact:**
+    1. Testing `feof(fp)` before `fgetc()` ran an extra iteration after the last byte, feeding `EOF` (`-1`) into the Hanzi branch.
+    2. DOS CRLF (`\r`, `0x0D`) and tabs (`\t`, `0x09`) fell into the `else` Hanzi branch, consuming the following ASCII character as the second byte of a garbage Chinese glyph and corrupting the rest of the line!
+    3. On open failure, the error alert did not set `state.functionActive = 1`, so clicking/pressing a key failed to dismiss it cleanly.
+    4. `New()` called `Savewarning(pEdit)` and immediately executed `FreeAllNode(pEdit)` anyway without waiting for the user's Y/N answer!
+- **How It Was Fixed:**
+  - Replaced with `while((r = fgetc(fp)) != EOF)`, explicitly skipped `'\r'`, expanded `'\t'` to 4 spaces, and only paired `r >= 0x80` with `r2 != EOF` for GB2312 Hanzi.
+  - Added relative `SAVE/` fallback, set `state.functionActive = 1` on open error, copied `spell.name` into `file.fname` via `strncpy`, and removed the broken `Savewarning()` inside `New()` (handled properly by modal state `12`).
+
+#### 22. Persistent `HZK16` Font Handle Leak — [editer/HANZI.C](editer/HANZI.C)
+- **Original Bug (`64a59d0`):** Opened `HZK16` only via hardcoded `C://TC30//BIN//hanziku//HZK16`, reopened it redundantly inside `OutputHanZi()` and closed it prematurely (breaking subsequent `Displayhz()` calls until reopened), and never closed it on shutdown.
+- **How It Was Fixed:** Added idempotent `open_hz()` (no-op if `phz != NULL`, with relative `hanziku/HZK16` fallback) and `close_hz()` (called on clean exit and OOM).
 
 ---
 
 ### 1.5 UI, Mouse & State-Machine Bugs
 
-| File | Function(s) | Original Bug | Fix |
-|---|---|---|---|
-| [editer/MOUSE.C](editer/MOUSE.C) | `MouseKey()`, `ChooseSubmenu()` | Tested modal button coordinates (`246..306 x 214..232`, etc.) **before** checking `fa != 0 && b == 1`, creating dead zones over the text viewport and flashing `button3d()` merely on hover. Clicking the top menu bar did not clear `state.key`, so a stale `F1`–`F4` keypress could override the clicked menu. | Gated all modal dialog hit-testing behind `if(fa != 0 && b == 1)` with early `return`, excluded the 20 px scrollbar from viewport text clicks, gated scrollbar arrows on `fa == 0 && editActive == 0`, and cleared `pEdit->state.key = 0` on menu clicks. |
-| [editer/VIEW.C](editer/VIEW.C) | `ViewAll()` | Never cleared stale `firstInLine = 1` flags on subsequent nodes after edits/deletions shifted line wraps, corrupting `UP`/`DOWN` scrolling, `LocateRow()`, and `RollBar()`. | Explicitly sets `pNode->firstInLine = 1` on `pageFirst` and resets `pNode->next->firstInLine = 0` before each wrap/newline test across the full tail of the document. |
-| [editer/SUBMENUS.C](editer/SUBMENUS.C) | `Submenu()` | Indexed `SubmenuNum[pEdit->editActive - 1]` without bounds checking `editActive` in `1..4`. | Added `pEdit->editActive >= 1 && pEdit->editActive <= 4` bounds check. |
-| [editer/EDITER2.C](editer/EDITER2.C) | `FunctionActiveSwitch()` | Pressing `ESC` in modal confirmations (`Exit`, `Save`, `Open`, `New`) had no escape path; pressing a non-copy/cut key after `Ctrl+A` (`functionActive == 13`) left selection highlight stuck on screen. | Added `ESC` cancel handling across modal dialogs and clean highlight dismissal in state `13`. |
+#### 23. Dead Click Zones Over Viewport & Hover Bevel Flicker in `MouseKey()` — [editer/MOUSE.C](editer/MOUSE.C)
+- **Original Bug (`64a59d0`):**
+  ```c
+  if(x<=306 && x>=246 && y>=214 && y<=232) /* matched EVEN WHEN fa==0 (no dialog open)! */
+  {
+      if(fa==2)
+      {
+          button3d(246, 214, 306, 232); /* flashed on hover even when b==0! */
+          if(b==1) { ... }
+      }
+      ...
+  }
+  else if(x>=5 && x<=634 && y>=50 && y<=450 && b==1 && pEdit->editActive==0)
+  ```
+  - **Root Cause & Impact:** Because the invisible modal button rectangles (`246..379 x 214..232`) were tested **before** `else if (viewport)` without checking `fa != 0`, clicking on normal text inside that central rectangle of the screen did nothing! Moving the mouse over an open dialog flashed `button3d()` continuously even without clicking, and clicking the scrollbar fell into the viewport text-click branch.
+  - In `ChooseSubmenu()`, clicking a top-bar menu set `state.function = 6` (`GetSubmenu()`) without clearing `state.key`, so a stale `F1`–`F4` scan code in `state.key` overrode the clicked menu!
+- **How It Was Fixed:** Wrapped all modal dialog hit-testing in `if(fa != 0 && b == 1)` with early `return`, restricted viewport clicks to `fa == 0 && editActive == 0 && x <= EDITERSCREENX2 - 20`, gated scrollbar arrow clicks on `fa == 0 && editActive == 0`, and cleared `pEdit->state.key = 0` before queuing `function = 6` on menu clicks.
+
+#### 24. Stale `firstInLine` Flags After Edits in `ViewAll()` — [editer/VIEW.C](editer/VIEW.C)
+- **Original Bug (`64a59d0`):** `ViewAll()` set `pNode->next->firstInLine = 1` at line wraps/newlines, but **never cleared old `firstInLine = 1` flags** on nodes that were no longer at column 0 after an insertion or deletion shifted wrap boundaries.
+  - **Root Cause & Impact:** Stale `firstInLine = 1` markers caused `RollBar()` to overcount lines, `LocateRow()` to stop mid-line (reporting wrong column numbers), and `MoveCursor()` (`UP`/`DOWN` scrolling) to jump to mid-line positions.
+- **How It Was Fixed:** Explicitly sets `pNode->firstInLine = 1` on `pageFirst` and clears `pNode->next->firstInLine = 0` on every node before evaluating hard newlines or soft wraps (`x >= maxX`) through the entire tail of the document.
+
+#### 25. Out-of-Bounds Menu Array Indexing & Modal Cancel Gaps — [editer/SUBMENUS.C](editer/SUBMENUS.C), [editer/EDITER2.C](editer/EDITER2.C)
+- **Original Bug (`64a59d0`):**
+  - `Submenu()` indexed `SubmenuNum[pEdit->editActive - 1]` without verifying `editActive` was in `1..4`.
+  - Modal confirmation states (`Exit`, `Save`, `Open`, `New`) had no `ESC` cancel branch; pressing an unrelated key after `Ctrl+A` (`functionActive == 13`) left the blue selection highlight stuck on screen.
+- **How It Was Fixed:** Added `pEdit->editActive >= 1 && pEdit->editActive <= 4` bounds check in `Submenu()`, added `ESC` cancellation to modal dialogs in `FunctionActiveSwitch()`, and cleared live selection highlight cleanly on any non-copy/cut key in state `13`.
 
 ---
 
