@@ -97,4 +97,8 @@
 #define JIANHAO    0x0c2d /* '-' key: previous page of 4 Hanzi candidates */
 #define DENGHAO    0x0d3d /* '=' key: next page of 4 Hanzi candidates */
 
+/* Synthetic key tag for native OS/terminal UTF-8 -> 2-byte GB18030 Hanzi input:
+ *   key = HANZI_KEY_TAG | ((unsigned char)gb0 << 8) | (unsigned char)gb1 */
+#define HANZI_KEY_TAG 0x10000
+
 #endif

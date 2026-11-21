@@ -86,7 +86,6 @@ int int86(int intno, union REGS *inregs, union REGS *outregs) {
 }
 
 extern int Find(struct EDITTYPE *pEdit, char *pGoal);
-extern int GetCode(char *tcode, int maxLen, char *pin);
 extern void LocateRow(struct EDITTYPE *pEdit, int *pRow);
 extern void LocateLine(struct EDITTYPE *pEdit, int *pLine);
 
@@ -315,7 +314,6 @@ static void test_find_and_replace(void) {
 
 static void test_hanzi_spell_save_open(void) {
     struct EDITTYPE e;
-    char code[300];
     char buf[256];
     int prevHanzi;
     init_edit(&e);
@@ -323,11 +321,6 @@ static void test_hanzi_spell_save_open(void) {
     prevHanzi = g_hanzi_calls;
     Printfhz(10, 10, "\xb9\xfe\xb9\xfe", BLACK, &e);
     assert(g_hanzi_calls == prevHanzi + 2);
-
-    assert(GetCode(code, sizeof(code), "yi") == 1);
-    assert(strlen(code) == 220);
-    assert(GetCode(code, sizeof(code), "yao") == 1);
-    assert(strlen(code) == 70);
 
     type_ascii(&e, "hello\nworld");
     e.spell.pcode[0] = (char)0xb9; e.spell.pcode[1] = (char)0xfe; Gethanzi(&e);
@@ -348,6 +341,8 @@ static void test_hanzi_spell_save_open(void) {
         const char *name = "ABCDEFGH.TXT";
         int i;
         for (i = 0; name[i]; i++) mock_push_key((int)name[i]);
+        /* Tagged Hanzi keys must be ignored by ASCII filename prompt */
+        mock_push_key(HANZI_KEY_TAG | 0xc4e3);
         mock_push_key(BACKSPACE);
         mock_push_key('C');
         mock_push_key(ENTER);

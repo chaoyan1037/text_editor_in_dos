@@ -61,10 +61,10 @@ void SwitchKey(struct EDITTYPE *pEdit);
 void FunctionActiveSwitch(struct EDITTYPE *pEdit);
 
 /*
- * ensure_project_cwd - If `spell/` is not in the current working directory
+ * ensure_project_cwd - If `SAVE/` is not in the current working directory
  *                      (e.g., when `./editor` is launched via Finder or from
  *                      another directory), switch to the directory containing
- *                      the executable so `SAVE/` and `spell/` are always found.
+ *                      the executable so `SAVE/` is always found.
  */
 static void ensure_project_cwd(const char *argv0)
 {
@@ -73,7 +73,7 @@ static void ensure_project_cwd(const char *argv0)
 	char probe[540];
 	size_t len;
 
-	if(access("spell", F_OK)==0)
+	if(access("SAVE", F_OK)==0)
 	{
 		return;
 	}
@@ -93,7 +93,7 @@ static void ensure_project_cwd(const char *argv0)
 	}
 	memcpy(dir, argv0, len);
 	dir[len]='\0';
-	sprintf(probe, "%s/spell", dir);
+	sprintf(probe, "%s/SAVE", dir);
 	if(access(probe, F_OK)==0)
 	{
 		if(chdir(dir)!=0)
@@ -167,7 +167,7 @@ int main(int argc, char *argv[])
 					long int i;
 					i=bioskey(0);
 					edit.state.key=i;
-					edit.state.ascii=(int)(i&0x00ff);
+					edit.state.ascii=(i & HANZI_KEY_TAG) ? 0 : (int)(i&0x00ff);
 					inputFlag=1;
 					if(edit.state.functionActive==0)
 					{
@@ -484,27 +484,20 @@ void SwitchKey(struct EDITTYPE *pEdit)
  *****************************************************************************/
 void FunctionActiveSwitch(struct EDITTYPE *pEdit)
 {
-	if(pEdit->language==0 && pEdit->state.functionActive==0)
+	if(pEdit->state.functionActive==0)
 	{
-		/* English mode: route any printable ASCII byte (0x20..0x7E) to GetEnglish */
-		if( pEdit->state.ascii>=0x20 && pEdit->state.ascii<=0x7e )
+		if((pEdit->state.key & HANZI_KEY_TAG)!=0)
 		{
-			pEdit->state.function=7;
+			/* Native OS/terminal UTF-8 -> GB18030 Chinese character input */
+			pEdit->spell.pcode[0]=(char)((pEdit->state.key >> 8) & 0xff);
+			pEdit->spell.pcode[1]=(char)(pEdit->state.key & 0xff);
+			pEdit->spell.pcode[2]='\0';
+			Gethanzi(pEdit);
 		}
-	}
-	else if(pEdit->language==1 && pEdit->state.functionActive==0)
-	{
-		/* Chinese mode: 'a'..'z' starts pinyin IME; punctuation/digits insert directly */
-		if( pEdit->state.ascii>=0x20 && pEdit->state.ascii<=0x7e )
+		else if( pEdit->state.ascii>=0x20 && pEdit->state.ascii<=0x7e )
 		{
-			if(pEdit->state.ascii>='a' && pEdit->state.ascii<='z')
-			{
-				Spell(pEdit);
-			}
-			else
-			{
-				pEdit->state.function=7;
-			}
+			/* Printable ASCII byte (0x20..0x7E) -> GetEnglish */
+			pEdit->state.function=7;
 		}
 	}
 	else if(pEdit->state.functionActive==1) /* Dismiss alert / Help popup on any key */

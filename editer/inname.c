@@ -228,7 +228,7 @@ static void run_file_dialog(struct EDITTYPE *pEdit, int selectMode)
 		if(bioskey(1)!=0)
 		{
 			key=bioskey(0);
-			letter=(int)(key&0x00ff);
+			letter=(key & HANZI_KEY_TAG) ? 0 : (int)(key&0x00ff);
 
 			if(key==ENTER)
 			{

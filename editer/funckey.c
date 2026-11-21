@@ -669,7 +669,7 @@ void FindFunction(struct EDITTYPE *pEdit)
 		if(bioskey(1)!=0)
 		{
 			long int key=bioskey(0);
-			int ascii=(int)(key&0x00ff);
+			int ascii=(key & HANZI_KEY_TAG) ? 0 : (int)(key&0x00ff);
 			if(key==ESC)
 			{
 				CancleFind(pEdit);
@@ -844,7 +844,7 @@ void FindAndReplace(struct EDITTYPE *pEdit)
 		if(bioskey(1)!=0)
 		{
 			long int key=bioskey(0);
-			int ascii=(int)(key&0x00ff);
+			int ascii=(key & HANZI_KEY_TAG) ? 0 : (int)(key&0x00ff);
 			if(key==ESC)
 			{
 				CancleReplace(pEdit);

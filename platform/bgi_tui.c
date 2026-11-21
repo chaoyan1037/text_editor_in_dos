@@ -67,13 +67,14 @@ static int g_cursor_col = 0;
 static int g_cursor_row = 2;
 static int g_cursor_visible = 1;
 
-/* Terminal state & iconv handle */
+/* Terminal state & iconv handles (GB18030 <-> UTF-8) */
 static struct termios g_orig_termios;
 static int g_termios_saved = 0;
 static iconv_t g_iconv_cd = (iconv_t)-1;
+static iconv_t g_iconv_to_gb = (iconv_t)-1;
 
-/* Keyboard queue (ring buffer of 16-bit BIOS key codes) */
-#define KEYQ_SIZE 64
+/* Keyboard queue (ring buffer of BIOS + tagged Hanzi key codes) */
+#define KEYQ_SIZE 512
 static int g_keyq[KEYQ_SIZE];
 static int g_keyq_head = 0;
 static int g_keyq_tail = 0;
@@ -448,6 +449,63 @@ static void parse_escape_seq(void)
     }
 }
 
+/* Decode a multi-byte UTF-8 character from stdin (native OS IME / paste)
+ * and convert it to a 2-byte GB18030 character tagged with HANZI_KEY_TAG. */
+static void parse_utf8_seq(int first_byte)
+{
+    char inbuf[4];
+    char outbuf[8];
+    int need = 0;
+    int i;
+
+    if ((first_byte & 0xE0) == 0xC0) need = 2;
+    else if ((first_byte & 0xF0) == 0xE0) need = 3;
+    else if ((first_byte & 0xF8) == 0xF0) need = 4;
+    else return;
+
+    inbuf[0] = (char)first_byte;
+    for (i = 1; i < need; i++)
+    {
+        int next = read_byte_timeout(25);
+        if (next < 0 || (next & 0xC0) != 0x80)
+        {
+            return;
+        }
+        inbuf[i] = (char)next;
+    }
+
+    if (g_iconv_to_gb != (iconv_t)-1)
+    {
+        char *pin = inbuf;
+        char *pout = outbuf;
+        size_t inleft = (size_t)need;
+        size_t outleft = sizeof(outbuf);
+        size_t rc;
+
+        iconv(g_iconv_to_gb, NULL, NULL, NULL, NULL);
+        rc = iconv(g_iconv_to_gb, &pin, &inleft, &pout, &outleft);
+        if (rc != (size_t)-1 && inleft == 0)
+        {
+            size_t outlen = sizeof(outbuf) - outleft;
+            if (outlen == 2)
+            {
+                int gb_key = HANZI_KEY_TAG
+                           | (((unsigned char)outbuf[0]) << 8)
+                           | ((unsigned char)outbuf[1]);
+                keyq_push(gb_key);
+            }
+            else if (outlen == 1)
+            {
+                int ch = (unsigned char)outbuf[0];
+                if (ch >= 0x20 && ch <= 0x7e)
+                {
+                    keyq_push(ch);
+                }
+            }
+        }
+    }
+}
+
 /* Poll stdin with optional wait (ms) and enqueue decoded keys/mouse events */
 static void poll_stdin(int timeout_ms)
 {
@@ -457,6 +515,10 @@ static void poll_stdin(int timeout_ms)
         if (b == 0x1b)
         {
             parse_escape_seq();
+        }
+        else if (b >= 0x80)
+        {
+            parse_utf8_seq(b);
         }
         else
         {
@@ -489,6 +551,11 @@ static void restore_terminal(void)
     {
         iconv_close(g_iconv_cd);
         g_iconv_cd = (iconv_t)-1;
+    }
+    if (g_iconv_to_gb != (iconv_t)-1)
+    {
+        iconv_close(g_iconv_to_gb);
+        g_iconv_to_gb = (iconv_t)-1;
     }
 }
 
@@ -534,6 +601,10 @@ void initgraph(int *gd, int *gm, const char *path)
     if (g_iconv_cd == (iconv_t)-1)
     {
         g_iconv_cd = iconv_open("UTF-8", "GB18030");
+    }
+    if (g_iconv_to_gb == (iconv_t)-1)
+    {
+        g_iconv_to_gb = iconv_open("GB18030", "UTF-8");
     }
 
     atexit(restore_terminal);
